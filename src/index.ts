@@ -318,8 +318,20 @@ bot.command('help', async (ctx) => {
 });
 
 // Start bot
-bot.launch().then(() => {
+bot.launch().then(async () => {
     console.log('Bot is running...');
+    try {
+        await bot.telegram.setMyCommands([
+            { command: 'start', description: 'Abrir el bot' },
+            { command: 'help', description: 'Ver comandos disponibles' },
+            { command: 'admin_panel', description: '⚙️ Panel de Administración' },
+            { command: 'new_order', description: '📝 Crear nueva orden (Meseros)' },
+            { command: 'sales_report', description: '📊 Reporte de ventas (Contadores)' }
+        ]);
+        console.log('Commands menu set up successfully');
+    } catch (e) {
+        console.error('Failed to set my commands', e);
+    }
 });
 
 // Enable graceful stop
