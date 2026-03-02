@@ -9,6 +9,11 @@ const bot = new Telegraf(process.env.BOT_TOKEN as string);
 // Basic Error Handling
 const productAddState = new Set<number>(); // For tracking admin adding products
 
+// Utility function to escape MarkdownV2
+function escapeMarkdownV2(text: string | number): string {
+    return String(text).replace(/[_*[\]()~`>#+\-=|{}.!]/g, '\\$&');
+}
+
 bot.catch((err, ctx) => {
     console.error(`Ooops, encountered an error for ${ctx.updateType}`, err);
 });
@@ -393,24 +398,24 @@ bot.action(/select_table_(.+)/, async (ctx) => {
             });
             await prisma.table.update({ where: { id: table.id }, data: { status: 'OCCUPIED' } });
 
-            await ctx.editMessageText(`✅ Cuenta abierta en *Mesa ${table.number}* por ${user.firstName}\\.\nUsa el botón abajo para agregar productos\\.`, {
+            await ctx.editMessageText(`✅ Cuenta abierta en *Mesa ${escapeMarkdownV2(table.number)}* por ${escapeMarkdownV2(user.firstName)}\\.\nUsa el botón abajo para agregar productos\\.`, {
                 parse_mode: 'MarkdownV2',
                 ...Markup.inlineKeyboard([[Markup.button.callback('➕ Agregar Productos', `add_items_${newOrder.id}`)]])
             });
         } else {
             // Already has open order
             const order = table.orders[0];
-            let msg = `🧾 *Cuenta Mesa ${table.number}*\nAbierta por: ${order.user.firstName}\n\n*Productos:*\n`;
+            let msg = `🧾 *Cuenta Mesa ${escapeMarkdownV2(table.number)}*\nAbierta por: ${escapeMarkdownV2(order.user.firstName)}\n\n*Productos:*\n`;
 
             if (order.items.length === 0) {
                 msg += '\\- Ninguno aún\n';
             } else {
                 order.items.forEach(item => {
-                    const itemName = item.name.replace(/([_*\[\]()~`>#+\-=|{}.!])/g, '\\$1');
-                    msg += `\\- ${itemName} x${item.quantity} \\(\\$${item.price.toFixed(2)}\\)\n`;
+                    const itemName = escapeMarkdownV2(item.name);
+                    msg += `\\- ${itemName} x${item.quantity} \\(\\$${escapeMarkdownV2(item.price.toFixed(2))}\\)\n`;
                 });
             }
-            msg += `\n*TOTAL:* \\$${order.total.toFixed(2)}`;
+            msg += `\n*TOTAL:* \\$${escapeMarkdownV2(order.total.toFixed(2))}`;
 
             await ctx.editMessageText(msg, {
                 parse_mode: 'MarkdownV2',
@@ -501,7 +506,7 @@ bot.action(/close_order_(.+)/, async (ctx) => {
         await prisma.order.update({ where: { id: orderId }, data: { status: 'CLOSED' } });
         await prisma.table.update({ where: { id: order.tableId }, data: { status: 'AVAILABLE' } });
 
-        await ctx.editMessageText(`✅ *Cuenta de Mesa ${order.table.number} CERRADA*\n*Total cobrado:* \\$${order.total.toFixed(2)}`, { parse_mode: 'MarkdownV2' });
+        await ctx.editMessageText(`✅ *Cuenta de Mesa ${escapeMarkdownV2(order.table.number)} CERRADA*\n*Total cobrado:* \\$${escapeMarkdownV2(order.total.toFixed(2))}`, { parse_mode: 'MarkdownV2' });
     } catch (err) {
         console.error(err);
         await ctx.answerCbQuery('Error al cerrar la cuenta');
