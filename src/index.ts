@@ -186,6 +186,7 @@ bot.action(/set_role_(.+)_(.+)/, async (ctx) => {
 });
 
 bot.action('admin_panel_back', async (ctx) => {
+    productAddState.delete(ctx.from.id);
     const adminMenu = Markup.inlineKeyboard([
         [Markup.button.callback('👥 Gestión de Roles', 'admin_roles')],
         [Markup.button.callback('🪑 Gestión de Mesas', 'admin_mesas')],
@@ -286,6 +287,7 @@ bot.action('admin_cuentas', async (ctx) => {
 
 // Menu Management
 bot.action('admin_menu', async (ctx) => {
+    productAddState.delete(ctx.from.id);
     try {
         const products = await prisma.product.findMany({ orderBy: { name: 'asc' } });
         const buttons = products.map(p => [Markup.button.callback(`${p.name} - $${p.price.toFixed(2)}`, `manage_product_${p.id}`)]);
@@ -536,8 +538,13 @@ bot.on('message', async (ctx, next) => {
                 await prisma.product.create({
                     data: { name, price }
                 });
-                productAddState.delete(telegramId);
-                await ctx.reply(`✅ Producto "${name}" guardado exitosamente con precio $${price.toFixed(2)}. Usa /admin_panel para seguir editando.`);
+
+                // Do not delete state, allow them to keep typing
+                await ctx.reply(`✅ Producto "${name}" guardado exitosamente con precio $${price.toFixed(2)}.\n\nEscribe el siguiente producto o presiona "Volver al Menú" para terminar.`, {
+                    ...Markup.inlineKeyboard([
+                        [Markup.button.callback('⬅️ Volver al menú', 'admin_menu')]
+                    ])
+                });
             } catch (err) {
                 console.error(err);
                 await ctx.reply('Error al guardar el producto.');
