@@ -136,18 +136,18 @@ bot.command('help', async (ctx) => {
         }
 
         let helpMessage = '📋 *Comandos Disponibles*\n\n';
-        helpMessage += '/start - Iniciar el bot\n';
+        helpMessage += '/start \\- Iniciar el bot\n';
 
         if (user.role === 'ADMIN') {
-            helpMessage += '/admin\\_panel - Panel de Administración\n';
-            helpMessage += '/sales\\_report - Reporte de ventas\n';
-            helpMessage += '/new\\_order - Crear nueva orden\n';
+            helpMessage += '/admin\\_panel \\- Panel de Administración\n';
+            helpMessage += '/sales\\_report \\- Reporte de ventas\n';
+            helpMessage += '/new\\_order \\- Crear nueva orden\n';
         } else if (user.role === 'CONTADOR') {
-            helpMessage += '/sales\\_report - Reporte de ventas\n';
+            helpMessage += '/sales\\_report \\- Reporte de ventas\n';
         } else if (user.role === 'MESERO') {
-            helpMessage += '/new\\_order - Crear nueva orden\n';
+            helpMessage += '/new\\_order \\- Crear nueva orden\n';
         } else if (user.role === 'PENDING') {
-            helpMessage += '\nTu cuenta está pendiente de aprobación. No tienes comandos adicionales aún.';
+            helpMessage += '\nTu cuenta está pendiente de aprobación\\. No tienes comandos adicionales aún\\.';
         }
 
         await ctx.replyWithMarkdownV2(helpMessage);
