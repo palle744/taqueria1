@@ -127,6 +127,36 @@ bot.command('new_order', requireRole(['ADMIN', 'MESERO']), async (ctx) => {
     await ctx.reply('📝 Nueva orden iniciada.\nPor favor escribe los productos.');
 });
 
+bot.command('help', async (ctx) => {
+    const telegramId = ctx.from.id;
+    try {
+        const user = await prisma.user.findUnique({ where: { telegramId } });
+        if (!user) {
+            return ctx.reply('No estás registrado. Escribe /start para comenzar.');
+        }
+
+        let helpMessage = '📋 *Comandos Disponibles*\n\n';
+        helpMessage += '/start - Iniciar el bot\n';
+
+        if (user.role === 'ADMIN') {
+            helpMessage += '/admin\\_panel - Panel de Administración\n';
+            helpMessage += '/sales\\_report - Reporte de ventas\n';
+            helpMessage += '/new\\_order - Crear nueva orden\n';
+        } else if (user.role === 'CONTADOR') {
+            helpMessage += '/sales\\_report - Reporte de ventas\n';
+        } else if (user.role === 'MESERO') {
+            helpMessage += '/new\\_order - Crear nueva orden\n';
+        } else if (user.role === 'PENDING') {
+            helpMessage += '\nTu cuenta está pendiente de aprobación. No tienes comandos adicionales aún.';
+        }
+
+        await ctx.replyWithMarkdownV2(helpMessage);
+    } catch (err) {
+        console.error(err);
+        await ctx.reply('Error al obtener la ayuda.');
+    }
+});
+
 // Start bot
 bot.launch().then(() => {
     console.log('Bot is running...');

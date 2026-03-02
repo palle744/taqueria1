@@ -1,0 +1,25 @@
+version: '3.8'
+
+services:
+  db:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_USER: user
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: tacosdb
+    ports:
+      - "5433:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  bot:
+    build: .
+    environment:
+      - DATABASE_URL=postgresql://user:password@db:5432/tacosdb?schema=public
+      - BOT_TOKEN=8689759788:AAG2uRl5rCN8tNm3e3nYAyVWXuiZANlNs50
+    depends_on:
+      - db
+    restart: unless-stopped
+
+volumes:
+  pgdata:
