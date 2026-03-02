@@ -6,7 +6,8 @@ dotenv.config();
 const bot = new Telegraf(process.env.BOT_TOKEN as string);
 
 // Basic Error Handling
-const orderAddState = new Map<number, { orderId: string, tableNumber: number }>();
+// Basic Error Handling
+const productAddState = new Set<number>(); // For tracking admin adding products
 
 bot.catch((err, ctx) => {
     console.error(`Ooops, encountered an error for ${ctx.updateType}`, err);
@@ -121,6 +122,7 @@ bot.command('admin_panel', requireRole(['ADMIN']), async (ctx) => {
     const adminMenu = Markup.inlineKeyboard([
         [Markup.button.callback('👥 Gestión de Roles', 'admin_roles')],
         [Markup.button.callback('🪑 Gestión de Mesas', 'admin_mesas')],
+        [Markup.button.callback('🍔 Gestión de Menú', 'admin_menu')],
         [Markup.button.callback('🧾 Cuentas Abiertas', 'admin_cuentas')]
     ]);
     await ctx.reply('⚙️ *Panel de Administración*\nSelecciona una opción:', { parse_mode: 'MarkdownV2', ...adminMenu });
@@ -187,6 +189,7 @@ bot.action('admin_panel_back', async (ctx) => {
     const adminMenu = Markup.inlineKeyboard([
         [Markup.button.callback('👥 Gestión de Roles', 'admin_roles')],
         [Markup.button.callback('🪑 Gestión de Mesas', 'admin_mesas')],
+        [Markup.button.callback('🍔 Gestión de Menú', 'admin_menu')],
         [Markup.button.callback('🧾 Cuentas Abiertas', 'admin_cuentas')]
     ]);
     await ctx.editMessageText('⚙️ *Panel de Administración*\nSelecciona una opción:', { parse_mode: 'MarkdownV2', ...adminMenu });
@@ -281,6 +284,62 @@ bot.action('admin_cuentas', async (ctx) => {
     }
 });
 
+// Menu Management
+bot.action('admin_menu', async (ctx) => {
+    try {
+        const products = await prisma.product.findMany({ orderBy: { name: 'asc' } });
+        const buttons = products.map(p => [Markup.button.callback(`${p.name} - $${p.price.toFixed(2)}`, `manage_product_${p.id}`)]);
+        buttons.push([Markup.button.callback('➕ Añadir Producto', 'add_product')]);
+        buttons.push([Markup.button.callback('⬅️ Volver', 'admin_panel_back')]);
+
+        await ctx.editMessageText('🍔 Gestión de Menú:', Markup.inlineKeyboard(buttons));
+    } catch (err) {
+        console.error(err);
+        await ctx.answerCbQuery('Error al cargar menú');
+    }
+});
+
+bot.action('add_product', async (ctx) => {
+    productAddState.add(ctx.from.id);
+    await ctx.answerCbQuery();
+    await ctx.reply('✍️ Escribe el nombre del nuevo producto y su precio.\nFormato: Nombre - Precio\nEjemplo: Torta de asada - 80\n(Envía la palabra "cancelar" para detener)');
+});
+
+bot.action(/manage_product_(.+)/, async (ctx) => {
+    const productId = ctx.match[1];
+    try {
+        const product = await prisma.product.findUnique({ where: { id: productId } });
+        if (!product) return ctx.answerCbQuery('Producto no encontrado');
+
+        const keyboard = Markup.inlineKeyboard([
+            [Markup.button.callback('❌ Eliminar Producto', `delete_product_${productId}`)],
+            [Markup.button.callback('⬅️ Volver al menú', 'admin_menu')]
+        ]);
+        await ctx.editMessageText(`Gestionando: ${product.name}\nPrecio: $${product.price.toFixed(2)}\n\n(Para editar, elimínalo y créalo de nuevo por ahora)`, keyboard);
+    } catch (err) {
+        console.error(err);
+        await ctx.answerCbQuery('Error al cargar producto');
+    }
+});
+
+bot.action(/delete_product_(.+)/, async (ctx) => {
+    const productId = ctx.match[1];
+    try {
+        await prisma.product.delete({ where: { id: productId } });
+        await ctx.answerCbQuery('Producto eliminado');
+
+        // Reload Menu
+        const products = await prisma.product.findMany({ orderBy: { name: 'asc' } });
+        const buttons = products.map(p => [Markup.button.callback(`${p.name} - $${p.price.toFixed(2)}`, `manage_product_${p.id}`)]);
+        buttons.push([Markup.button.callback('➕ Añadir Producto', 'add_product')]);
+        buttons.push([Markup.button.callback('⬅️ Volver', 'admin_panel_back')]);
+        await ctx.editMessageText('🍔 Gestión de Menú:', Markup.inlineKeyboard(buttons));
+    } catch (err) {
+        console.error(err);
+        await ctx.answerCbQuery('Error al eliminar producto');
+    }
+});
+
 bot.command('sales_report', requireRole(['ADMIN', 'CONTADOR']), async (ctx) => {
     await ctx.reply('Generando reporte de ventas...\n(Logica de base de datos de ventas irá aquí).');
 });
@@ -367,17 +426,53 @@ bot.action(/select_table_(.+)/, async (ctx) => {
 
 bot.action(/add_items_(.+)/, async (ctx) => {
     const orderId = ctx.match[1];
-    const telegramId = ctx.from.id;
     try {
         const order = await prisma.order.findUnique({ where: { id: orderId }, include: { table: true } });
         if (!order || order.status !== 'OPEN') return ctx.answerCbQuery('La cuenta no está abierta o no existe');
 
-        orderAddState.set(telegramId, { orderId, tableNumber: order.table.number });
-        await ctx.answerCbQuery();
-        await ctx.reply(`✍️ Escribe el nombre del producto y el precio para la Mesa ${order.table.number}.\nFormato sugerido: Nombre - Precio\nEjemplo: 3 Tacos al pastor - 60\n(Envía la palabra "fin" cuando termines)`);
+        const products = await prisma.product.findMany({ orderBy: { name: 'asc' } });
+        if (products.length === 0) {
+            return ctx.answerCbQuery('El menú está vacío. Añade productos desde el panel de admin.', { show_alert: true });
+        }
+
+        const buttons = products.map(p => [Markup.button.callback(`➕ ${p.name} ($${p.price.toFixed(2)})`, `add_to_order_${order.id}_prod_${p.id}`)]);
+        buttons.push([Markup.button.callback('⬅️ Volver a la cuenta', `select_table_${order.table.id}`)]);
+
+        await ctx.editMessageText(`📖 *Menú*\nSelecciona productos para la Mesa ${order.table.number}:`, { parse_mode: 'MarkdownV2', ...Markup.inlineKeyboard(buttons) });
     } catch (err) {
         console.error(err);
-        await ctx.answerCbQuery('Error al preparar adición');
+        await ctx.answerCbQuery('Error al cargar el menú para la orden');
+    }
+});
+
+bot.action(/add_to_order_(.+)_prod_(.+)/, async (ctx) => {
+    const orderId = ctx.match[1];
+    const productId = ctx.match[2];
+
+    try {
+        const product = await prisma.product.findUnique({ where: { id: productId } });
+        const order = await prisma.order.findUnique({ where: { id: orderId } });
+
+        if (!product || !order) return ctx.answerCbQuery('Error, producto u orden no encontrados');
+
+        await prisma.orderItem.create({
+            data: {
+                orderId: order.id,
+                name: product.name,
+                price: product.price,
+                quantity: 1
+            }
+        });
+
+        await prisma.order.update({
+            where: { id: order.id },
+            data: { total: { increment: product.price } }
+        });
+
+        await ctx.answerCbQuery(`✅ Añadido: ${product.name}`);
+    } catch (err) {
+        console.error(err);
+        await ctx.answerCbQuery('Error al añadir producto a la orden');
     }
 });
 
@@ -400,53 +495,44 @@ bot.action(/close_order_(.+)/, async (ctx) => {
 bot.on('message', async (ctx, next) => {
     const telegramId = ctx.from.id;
 
-    if (orderAddState.has(telegramId) && ctx.message && 'text' in ctx.message) {
+    if (ctx.message && 'text' in ctx.message) {
         const text = ctx.message.text.trim();
-        const state = orderAddState.get(telegramId)!;
 
-        if (text.toLowerCase() === 'fin') {
-            orderAddState.delete(telegramId);
-            return ctx.reply(`✅ Terminaste de agregar productos a la Mesa ${state.tableNumber}. Usa /new_order para ver la cuenta u otra mesa.`);
+        if (productAddState.has(telegramId)) {
+            if (text.toLowerCase() === 'cancelar') {
+                productAddState.delete(telegramId);
+                return ctx.reply('Adición de producto cancelada. Usa /admin_panel para volver al menú.');
+            }
+
+            let price = 0;
+            let name = text;
+            const lastDashMatch = text.match(/(.+)(?:-|\$)\s*([\d.]+)$/);
+            if (lastDashMatch) {
+                name = lastDashMatch[1].trim();
+                price = parseFloat(lastDashMatch[2]);
+            }
+
+            if (isNaN(price)) price = 0;
+
+            if (price === 0) {
+                return ctx.reply('No se detectó un precio válido. Por favor intenta de nuevo con el formato "Nombre - Precio" o escribe "cancelar".');
+            }
+
+            try {
+                await prisma.product.create({
+                    data: { name, price }
+                });
+                productAddState.delete(telegramId);
+                await ctx.reply(`✅ Producto "${name}" guardado exitosamente con precio $${price.toFixed(2)}. Usa /admin_panel para seguir editando.`);
+            } catch (err) {
+                console.error(err);
+                await ctx.reply('Error al guardar el producto.');
+            }
+            return;
         }
-
-        // Try to parse basic item string: "Name - Price"
-        let price = 0;
-        let name = text;
-        const lastDashMatch = text.match(/(.+)(?:-|\$)\s*([\d.]+)$/);
-        if (lastDashMatch) {
-            name = lastDashMatch[1].trim();
-            price = parseFloat(lastDashMatch[2]);
-        } else {
-            // default to 0 if not parsed
-            price = 0;
-        }
-
-        if (isNaN(price)) price = 0;
-
-        try {
-            await prisma.orderItem.create({
-                data: {
-                    orderId: state.orderId,
-                    name: name,
-                    price: price,
-                    quantity: 1 // default for now
-                }
-            });
-
-            // Update order total
-            await prisma.order.update({
-                where: { id: state.orderId },
-                data: { total: { increment: price } }
-            });
-
-            await ctx.reply(`Añadido: ${name} ($${price}). Escribe otro o escribe "fin".`);
-        } catch (err) {
-            console.error(err);
-            await ctx.reply('Error al guardar el producto.');
-        }
-    } else {
-        return next();
     }
+
+    return next();
 });
 
 bot.command('help', async (ctx) => {
