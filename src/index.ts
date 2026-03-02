@@ -8,6 +8,7 @@ const bot = new Telegraf(process.env.BOT_TOKEN as string);
 // Basic Error Handling
 // Basic Error Handling
 const productAddState = new Set<number>(); // For tracking admin adding products
+const orderAddState = new Map<number, { orderId: string, tableNumber: number }>(); // For tracking active order
 
 // Utility function to escape MarkdownV2
 function escapeMarkdownV2(text: string | number): string {
@@ -433,28 +434,38 @@ bot.action(/select_table_(.+)/, async (ctx) => {
 
 bot.action(/add_items_(.+)/, async (ctx) => {
     const orderId = ctx.match[1];
+    const telegramId = ctx.from.id;
     try {
         const order = await prisma.order.findUnique({ where: { id: orderId }, include: { table: true } });
         if (!order || order.status !== 'OPEN') return ctx.answerCbQuery('La cuenta no está abierta o no existe');
+
+        // Store active order ID in session state to avoid 64-byte callback limit on Telegram
+        orderAddState.set(telegramId, { orderId, tableNumber: order.table.number });
 
         const products = await prisma.product.findMany({ orderBy: { name: 'asc' } });
         if (products.length === 0) {
             return ctx.answerCbQuery('El menú está vacío. Añade productos desde el panel de admin.', { show_alert: true });
         }
 
-        const buttons = products.map(p => [Markup.button.callback(`➕ ${p.name} ($${p.price.toFixed(2)})`, `add_to_order_${order.id}_prod_${p.id}`)]);
+        const buttons = products.map(p => [Markup.button.callback(`➕ ${p.name} ($${p.price.toFixed(2)})`, `add_prod_${p.id}`)]);
         buttons.push([Markup.button.callback('⬅️ Volver a la cuenta', `select_table_${order.table.id}`)]);
 
-        await ctx.editMessageText(`📖 *Menú*\nSelecciona productos para la Mesa ${order.table.number}:`, { parse_mode: 'MarkdownV2', ...Markup.inlineKeyboard(buttons) });
+        await ctx.editMessageText(`📖 *Menú*\nSelecciona productos para la Mesa ${escapeMarkdownV2(order.table.number)}:`, { parse_mode: 'MarkdownV2', ...Markup.inlineKeyboard(buttons) });
     } catch (err) {
         console.error(err);
         await ctx.answerCbQuery('Error al cargar el menú para la orden');
     }
 });
 
-bot.action(/add_to_order_(.+)_prod_(.+)/, async (ctx) => {
-    const orderId = ctx.match[1];
-    const productId = ctx.match[2];
+bot.action(/add_prod_(.+)/, async (ctx) => {
+    const productId = ctx.match[1];
+    const telegramId = ctx.from.id;
+
+    // Retrieve active order from state
+    const state = orderAddState.get(telegramId);
+    if (!state) return ctx.answerCbQuery('Sesión caducada, por favor vuelve a abrir la mesa.', { show_alert: true });
+
+    const orderId = state.orderId;
 
     try {
         const product = await prisma.product.findUnique({ where: { id: productId } });
@@ -480,13 +491,13 @@ bot.action(/add_to_order_(.+)_prod_(.+)/, async (ctx) => {
 
         // Rerender the menu to show the updated status
         const products = await prisma.product.findMany({ orderBy: { name: 'asc' } });
-        const buttons = products.map(p => [Markup.button.callback(`➕ ${p.name} ($${p.price.toFixed(2)})`, `add_to_order_${order.id}_prod_${p.id}`)]);
+        const buttons = products.map(p => [Markup.button.callback(`➕ ${p.name} ($${p.price.toFixed(2)})`, `add_prod_${p.id}`)]);
         buttons.push([Markup.button.callback('⬅️ Volver a la cuenta', `select_table_${order.table.id}`)]);
 
         // Replace special characters for MarkdownV2, except the ones we use for formatting
-        const safeProductName = product.name.replace(/([_*\[\]()~`>#+\-=|{}.!])/g, '\\$1');
+        const safeProductName = escapeMarkdownV2(product.name);
 
-        await ctx.editMessageText(`📖 *Menú*\n✅ Añadido: ${safeProductName}\nSigue seleccionando productos para la Mesa ${order.table.number}:`, {
+        await ctx.editMessageText(`📖 *Menú*\n✅ Añadido: ${safeProductName}\nSigue seleccionando productos para la Mesa ${escapeMarkdownV2(order.table.number)}:`, {
             parse_mode: 'MarkdownV2',
             ...Markup.inlineKeyboard(buttons)
         });
