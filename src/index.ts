@@ -6,6 +6,8 @@ dotenv.config();
 const bot = new Telegraf(process.env.BOT_TOKEN as string);
 
 // Basic Error Handling
+const orderAddState = new Map<number, { orderId: string, tableNumber: number }>();
+
 bot.catch((err, ctx) => {
     console.error(`Ooops, encountered an error for ${ctx.updateType}`, err);
 });
@@ -284,7 +286,167 @@ bot.command('sales_report', requireRole(['ADMIN', 'CONTADOR']), async (ctx) => {
 });
 
 bot.command('new_order', requireRole(['ADMIN', 'MESERO']), async (ctx) => {
-    await ctx.reply('📝 Nueva orden iniciada.\nPor favor escribe los productos.');
+    try {
+        const tables = await prisma.table.findMany({ orderBy: { number: 'asc' } });
+        if (tables.length === 0) {
+            return ctx.reply('No hay mesas configuradas en el sistema. Usa /admin_panel para agregar mesas primero.');
+        }
+
+        const buttons = tables.map(t => [Markup.button.callback(`Mesa ${t.number} - ${t.status === 'AVAILABLE' ? 'Libre' : 'Ocupada'}`, `select_table_${t.id}`)]);
+        await ctx.reply('🍽️ *Nueva Orden / Ver Cuenta*\nSelecciona una mesa:', { parse_mode: 'MarkdownV2', ...Markup.inlineKeyboard(buttons) });
+    } catch (err) {
+        console.error(err);
+        await ctx.reply('Error al cargar mesas.');
+    }
+});
+
+bot.action(/select_table_(.+)/, async (ctx) => {
+    const tableId = ctx.match[1];
+    const telegramId = ctx.from.id;
+
+    try {
+        const user = await prisma.user.findUnique({ where: { telegramId } });
+        if (!user) return ctx.answerCbQuery('Usuario no encontrado');
+
+        const table = await prisma.table.findUnique({
+            where: { id: tableId },
+            include: {
+                orders: {
+                    where: { status: 'OPEN' },
+                    include: { items: true, user: true }
+                }
+            }
+        });
+
+        if (!table) return ctx.answerCbQuery('Mesa no encontrada');
+
+        if (table.orders.length === 0) {
+            // No open order, create one
+            const newOrder = await prisma.order.create({
+                data: {
+                    tableId: table.id,
+                    userId: user.id,
+                    status: 'OPEN',
+                    total: 0
+                }
+            });
+            await prisma.table.update({ where: { id: table.id }, data: { status: 'OCCUPIED' } });
+
+            await ctx.editMessageText(`✅ Cuenta abierta en *Mesa ${table.number}* por ${user.firstName}\\.\nUsa el botón abajo para agregar productos\\.`, {
+                parse_mode: 'MarkdownV2',
+                ...Markup.inlineKeyboard([[Markup.button.callback('➕ Agregar Productos', `add_items_${newOrder.id}`)]])
+            });
+        } else {
+            // Already has open order
+            const order = table.orders[0];
+            let msg = `🧾 *Cuenta Mesa ${table.number}*\nAbierta por: ${order.user.firstName}\n\n*Productos:*\n`;
+
+            if (order.items.length === 0) {
+                msg += '\\- Ninguno aún\n';
+            } else {
+                order.items.forEach(item => {
+                    const itemName = item.name.replace(/([_*\[\]()~`>#+\-=|{}.!])/g, '\\$1');
+                    msg += `\\- ${itemName} x${item.quantity} \\(\\$${item.price.toFixed(2)}\\)\n`;
+                });
+            }
+            msg += `\n*TOTAL:* \\$${order.total.toFixed(2)}`;
+
+            await ctx.editMessageText(msg, {
+                parse_mode: 'MarkdownV2',
+                ...Markup.inlineKeyboard([
+                    [Markup.button.callback('➕ Agregar Productos', `add_items_${order.id}`)],
+                    [Markup.button.callback('❌ Cerrar Cuenta (Cobrar)', `close_order_${order.id}`)]
+                ])
+            });
+        }
+    } catch (err) {
+        console.error(err);
+        await ctx.answerCbQuery('Error al procesar la mesa');
+    }
+});
+
+bot.action(/add_items_(.+)/, async (ctx) => {
+    const orderId = ctx.match[1];
+    const telegramId = ctx.from.id;
+    try {
+        const order = await prisma.order.findUnique({ where: { id: orderId }, include: { table: true } });
+        if (!order || order.status !== 'OPEN') return ctx.answerCbQuery('La cuenta no está abierta o no existe');
+
+        orderAddState.set(telegramId, { orderId, tableNumber: order.table.number });
+        await ctx.answerCbQuery();
+        await ctx.reply(`✍️ Escribe el nombre del producto y el precio para la Mesa ${order.table.number}.\nFormato sugerido: Nombre - Precio\nEjemplo: 3 Tacos al pastor - 60\n(Envía la palabra "fin" cuando termines)`);
+    } catch (err) {
+        console.error(err);
+        await ctx.answerCbQuery('Error al preparar adición');
+    }
+});
+
+bot.action(/close_order_(.+)/, async (ctx) => {
+    const orderId = ctx.match[1];
+    try {
+        const order = await prisma.order.findUnique({ where: { id: orderId }, include: { table: true } });
+        if (!order) return ctx.answerCbQuery('No se encontró la orden');
+
+        await prisma.order.update({ where: { id: orderId }, data: { status: 'CLOSED' } });
+        await prisma.table.update({ where: { id: order.tableId }, data: { status: 'AVAILABLE' } });
+
+        await ctx.editMessageText(`✅ *Cuenta de Mesa ${order.table.number} CERRADA*\n*Total cobrado:* \\$${order.total.toFixed(2)}`, { parse_mode: 'MarkdownV2' });
+    } catch (err) {
+        console.error(err);
+        await ctx.answerCbQuery('Error al cerrar la cuenta');
+    }
+});
+
+bot.on('message', async (ctx, next) => {
+    const telegramId = ctx.from.id;
+
+    if (orderAddState.has(telegramId) && ctx.message && 'text' in ctx.message) {
+        const text = ctx.message.text.trim();
+        const state = orderAddState.get(telegramId)!;
+
+        if (text.toLowerCase() === 'fin') {
+            orderAddState.delete(telegramId);
+            return ctx.reply(`✅ Terminaste de agregar productos a la Mesa ${state.tableNumber}. Usa /new_order para ver la cuenta u otra mesa.`);
+        }
+
+        // Try to parse basic item string: "Name - Price"
+        let price = 0;
+        let name = text;
+        const lastDashMatch = text.match(/(.+)(?:-|\$)\s*([\d.]+)$/);
+        if (lastDashMatch) {
+            name = lastDashMatch[1].trim();
+            price = parseFloat(lastDashMatch[2]);
+        } else {
+            // default to 0 if not parsed
+            price = 0;
+        }
+
+        if (isNaN(price)) price = 0;
+
+        try {
+            await prisma.orderItem.create({
+                data: {
+                    orderId: state.orderId,
+                    name: name,
+                    price: price,
+                    quantity: 1 // default for now
+                }
+            });
+
+            // Update order total
+            await prisma.order.update({
+                where: { id: state.orderId },
+                data: { total: { increment: price } }
+            });
+
+            await ctx.reply(`Añadido: ${name} ($${price}). Escribe otro o escribe "fin".`);
+        } catch (err) {
+            console.error(err);
+            await ctx.reply('Error al guardar el producto.');
+        }
+    } else {
+        return next();
+    }
 });
 
 bot.command('help', async (ctx) => {
