@@ -23,4 +23,36 @@ model User {
   role       Role     @default(PENDING)
   createdAt  DateTime @default(now())
   updatedAt  DateTime @updatedAt
+  orders     Order[]
+}
+
+enum TableStatus {
+  AVAILABLE
+  OCCUPIED
+}
+
+model Table {
+  id        String      @id @default(uuid())
+  number    Int         @unique
+  status    TableStatus @default(AVAILABLE)
+  orders    Order[]
+  createdAt DateTime    @default(now())
+  updatedAt DateTime    @updatedAt
+}
+
+enum OrderStatus {
+  OPEN
+  CLOSED
+}
+
+model Order {
+  id        String      @id @default(uuid())
+  tableId   String
+  table     Table       @relation(fields: [tableId], references: [id])
+  userId    String
+  user      User        @relation(fields: [userId], references: [id])
+  status    OrderStatus @default(OPEN)
+  total     Float       @default(0.0)
+  createdAt DateTime    @default(now())
+  updatedAt DateTime    @updatedAt
 }

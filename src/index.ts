@@ -116,7 +116,167 @@ import { requireRole } from './middleware';
 
 // Restricted commands
 bot.command('admin_panel', requireRole(['ADMIN']), async (ctx) => {
-    await ctx.reply('Bienvenido al Panel de Administración.\nAquí podrás ver configuraciones del restaurante (Próximamente).');
+    const adminMenu = Markup.inlineKeyboard([
+        [Markup.button.callback('👥 Gestión de Roles', 'admin_roles')],
+        [Markup.button.callback('🪑 Gestión de Mesas', 'admin_mesas')],
+        [Markup.button.callback('🧾 Cuentas Abiertas', 'admin_cuentas')]
+    ]);
+    await ctx.reply('⚙️ *Panel de Administración*\nSelecciona una opción:', { parse_mode: 'MarkdownV2', ...adminMenu });
+});
+
+// Admin Panel Callbacks
+bot.action('admin_roles', async (ctx) => {
+    try {
+        const users = await prisma.user.findMany({ where: { role: { not: 'ADMIN' } } });
+        if (users.length === 0) {
+            await ctx.editMessageText('No hay usuarios para gestionar.');
+            return;
+        }
+
+        const buttons = users.map(u => [Markup.button.callback(`${u.firstName} - ${u.role}`, `manage_user_${u.id}`)]);
+        buttons.push([Markup.button.callback('⬅️ Volver', 'admin_panel_back')]);
+
+        await ctx.editMessageText('Selecciona un usuario para gestionar su rol:', Markup.inlineKeyboard(buttons));
+    } catch (err) {
+        console.error(err);
+        await ctx.answerCbQuery('Error al cargar roles');
+    }
+});
+
+bot.action(/manage_user_(.+)/, async (ctx) => {
+    const userId = ctx.match[1];
+    try {
+        const user = await prisma.user.findUnique({ where: { id: userId } });
+        if (!user) return ctx.answerCbQuery('Usuario no encontrado');
+
+        const keyboard = Markup.inlineKeyboard([
+            [Markup.button.callback('Asignar MESERO', `set_role_MESERO_${userId}`)],
+            [Markup.button.callback('Asignar CONTADOR', `set_role_CONTADOR_${userId}`)],
+            [Markup.button.callback('RECHAZAR', `set_role_REJECTED_${userId}`)],
+            [Markup.button.callback('⬅️ Volver', 'admin_roles')]
+        ]);
+        await ctx.editMessageText(`Gestionando a ${user.firstName} (Rol actual: ${user.role})`, keyboard);
+    } catch (err) {
+        console.error(err);
+        await ctx.answerCbQuery('Error al cargar usuario');
+    }
+});
+
+bot.action(/set_role_(.+)_(.+)/, async (ctx) => {
+    const newRole = ctx.match[1] as any;
+    const userId = ctx.match[2];
+    try {
+        await prisma.user.update({ where: { id: userId }, data: { role: newRole } });
+        await ctx.answerCbQuery(`Rol de usuario actualizado a ${newRole}`);
+
+        // Return to roles menu
+        const users = await prisma.user.findMany({ where: { role: { not: 'ADMIN' } } });
+        const buttons = users.map(u => [Markup.button.callback(`${u.firstName} - ${u.role}`, `manage_user_${u.id}`)]);
+        buttons.push([Markup.button.callback('⬅️ Volver', 'admin_panel_back')]);
+
+        await ctx.editMessageText('Rol actualizado. Selecciona un usuario para gestionar:', Markup.inlineKeyboard(buttons));
+    } catch (err) {
+        console.error(err);
+        await ctx.answerCbQuery('Error al actualizar el rol');
+    }
+});
+
+bot.action('admin_panel_back', async (ctx) => {
+    const adminMenu = Markup.inlineKeyboard([
+        [Markup.button.callback('👥 Gestión de Roles', 'admin_roles')],
+        [Markup.button.callback('🪑 Gestión de Mesas', 'admin_mesas')],
+        [Markup.button.callback('🧾 Cuentas Abiertas', 'admin_cuentas')]
+    ]);
+    await ctx.editMessageText('⚙️ *Panel de Administración*\nSelecciona una opción:', { parse_mode: 'MarkdownV2', ...adminMenu });
+});
+
+bot.action('admin_mesas', async (ctx) => {
+    try {
+        const tables = await prisma.table.findMany({ orderBy: { number: 'asc' } });
+        const buttons = tables.map(t => [Markup.button.callback(`Mesa ${t.number} - ${t.status}`, `manage_mesa_${t.id}`)]);
+        buttons.push([Markup.button.callback('➕ Añadir Mesa', 'add_mesa')]);
+        buttons.push([Markup.button.callback('⬅️ Volver', 'admin_panel_back')]);
+
+        await ctx.editMessageText('Gestión de Mesas:', Markup.inlineKeyboard(buttons));
+    } catch (err) {
+        console.error(err);
+        await ctx.answerCbQuery('Error al cargar mesas');
+    }
+});
+
+bot.action('add_mesa', async (ctx) => {
+    try {
+        const tables = await prisma.table.findMany({ orderBy: { number: 'desc' }, take: 1 });
+        const nextNumber = tables.length > 0 ? tables[0].number + 1 : 1;
+        await prisma.table.create({ data: { number: nextNumber } });
+        await ctx.answerCbQuery(`Mesa ${nextNumber} añadida.`);
+
+        // Reload mesas
+        const allTables = await prisma.table.findMany({ orderBy: { number: 'asc' } });
+        const buttons = allTables.map(t => [Markup.button.callback(`Mesa ${t.number} - ${t.status}`, `manage_mesa_${t.id}`)]);
+        buttons.push([Markup.button.callback('➕ Añadir Mesa', 'add_mesa')]);
+        buttons.push([Markup.button.callback('⬅️ Volver', 'admin_panel_back')]);
+        await ctx.editMessageText('Gestión de Mesas:', Markup.inlineKeyboard(buttons));
+    } catch (err) {
+        console.error(err);
+        await ctx.answerCbQuery('Error al añadir mesa');
+    }
+});
+
+bot.action(/manage_mesa_(.+)/, async (ctx) => {
+    const tableId = ctx.match[1];
+    try {
+        const table = await prisma.table.findUnique({ where: { id: tableId } });
+        if (!table) return ctx.answerCbQuery('Mesa no encontrada');
+        const keyboard = Markup.inlineKeyboard([
+            [Markup.button.callback('❌ Eliminar Mesa', `delete_mesa_${tableId}`)],
+            [Markup.button.callback('⬅️ Volver', 'admin_mesas')]
+        ]);
+        await ctx.editMessageText(`Gestionando Mesa ${table.number}\nEstado actual: ${table.status}`, keyboard);
+    } catch (err) {
+        console.error(err);
+        await ctx.answerCbQuery('Error al cargar mesa');
+    }
+});
+
+bot.action(/delete_mesa_(.+)/, async (ctx) => {
+    const tableId = ctx.match[1];
+    try {
+        await prisma.table.delete({ where: { id: tableId } });
+        await ctx.answerCbQuery('Mesa eliminada correctamente');
+
+        // Reload mesas
+        const allTables = await prisma.table.findMany({ orderBy: { number: 'asc' } });
+        const buttons = allTables.map(t => [Markup.button.callback(`Mesa ${t.number} - ${t.status}`, `manage_mesa_${t.id}`)]);
+        buttons.push([Markup.button.callback('➕ Añadir Mesa', 'add_mesa')]);
+        buttons.push([Markup.button.callback('⬅️ Volver', 'admin_panel_back')]);
+        await ctx.editMessageText('Gestión de Mesas:', Markup.inlineKeyboard(buttons));
+    } catch (err) {
+        console.error(err);
+        // Usually fails if there are linked orders to this table
+        await ctx.answerCbQuery('Error: No se puede eliminar si tiene historial de cuentas.');
+    }
+});
+
+bot.action('admin_cuentas', async (ctx) => {
+    try {
+        const openOrders = await prisma.order.findMany({
+            where: { status: 'OPEN' },
+            include: { table: true, user: true }
+        });
+
+        if (openOrders.length === 0) {
+            await ctx.editMessageText('No hay cuentas abiertas actualmente.', Markup.inlineKeyboard([[Markup.button.callback('⬅️ Volver', 'admin_panel_back')]]));
+            return;
+        }
+
+        const buttons = openOrders.map(o => [Markup.button.callback(`Mesa ${o.table.number} - Atendida por ${o.user.firstName}`, `view_order_${o.id}`)]);
+        buttons.push([Markup.button.callback('⬅️ Volver', 'admin_panel_back')]);
+        await ctx.editMessageText('Cuentas Abiertas:', Markup.inlineKeyboard(buttons));
+    } catch (err) {
+        console.error(err);
+        await ctx.answerCbQuery('Error al cargar cuentas');
+    }
 });
 
 bot.command('sales_report', requireRole(['ADMIN', 'CONTADOR']), async (ctx) => {
