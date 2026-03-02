@@ -451,7 +451,7 @@ bot.action(/add_to_order_(.+)_prod_(.+)/, async (ctx) => {
 
     try {
         const product = await prisma.product.findUnique({ where: { id: productId } });
-        const order = await prisma.order.findUnique({ where: { id: orderId } });
+        const order = await prisma.order.findUnique({ where: { id: orderId }, include: { table: true } });
 
         if (!product || !order) return ctx.answerCbQuery('Error, producto u orden no encontrados');
 
@@ -470,6 +470,20 @@ bot.action(/add_to_order_(.+)_prod_(.+)/, async (ctx) => {
         });
 
         await ctx.answerCbQuery(`✅ Añadido: ${product.name}`);
+
+        // Rerender the menu to show the updated status
+        const products = await prisma.product.findMany({ orderBy: { name: 'asc' } });
+        const buttons = products.map(p => [Markup.button.callback(`➕ ${p.name} ($${p.price.toFixed(2)})`, `add_to_order_${order.id}_prod_${p.id}`)]);
+        buttons.push([Markup.button.callback('⬅️ Volver a la cuenta', `select_table_${order.table.id}`)]);
+
+        // Replace special characters for MarkdownV2, except the ones we use for formatting
+        const safeProductName = product.name.replace(/([_*\[\]()~`>#+\-=|{}.!])/g, '\\$1');
+
+        await ctx.editMessageText(`📖 *Menú*\n✅ Añadido: ${safeProductName}\nSigue seleccionando productos para la Mesa ${order.table.number}:`, {
+            parse_mode: 'MarkdownV2',
+            ...Markup.inlineKeyboard(buttons)
+        });
+
     } catch (err) {
         console.error(err);
         await ctx.answerCbQuery('Error al añadir producto a la orden');
