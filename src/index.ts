@@ -422,6 +422,7 @@ bot.action(/select_table_(.+)/, async (ctx) => {
                 parse_mode: 'MarkdownV2',
                 ...Markup.inlineKeyboard([
                     [Markup.button.callback('➕ Agregar Productos', `add_items_${order.id}`)],
+                    [Markup.button.callback('✏️ Editar Cuenta (Eliminar)', `edit_order_${order.id}`)],
                     [Markup.button.callback('❌ Cerrar Cuenta (Cobrar)', `close_order_${order.id}`)]
                 ])
             });
@@ -429,6 +430,84 @@ bot.action(/select_table_(.+)/, async (ctx) => {
     } catch (err) {
         console.error(err);
         await ctx.answerCbQuery('Error al procesar la mesa');
+    }
+});
+
+bot.action(/edit_order_(.+)/, async (ctx) => {
+    const orderId = ctx.match[1];
+    try {
+        const order = await prisma.order.findUnique({
+            where: { id: orderId },
+            include: { items: true, table: true }
+        });
+        if (!order || order.status !== 'OPEN') return ctx.answerCbQuery('La cuenta no está abierta o no existe');
+
+        let msg = `✏️ *Editando Cuenta Mesa ${escapeMarkdownV2(order.table.number)}*\nSelecciona un producto para eliminarlo:\n\n`;
+        const buttons: any[] = [];
+
+        if (order.items.length === 0) {
+            msg += '\\- Ninguno aún\n';
+        } else {
+            for (const item of order.items) {
+                const itemName = item.name.length > 20 ? item.name.substring(0, 20) + '...' : item.name;
+                buttons.push([Markup.button.callback(`❌ Eliminar ${itemName} ($${item.price.toFixed(2)})`, `rm_itm_${item.id}`)]);
+            }
+        }
+
+        buttons.push([Markup.button.callback('⬅️ Volver a la cuenta', `select_table_${order.table.id}`)]);
+
+        await ctx.editMessageText(msg, {
+            parse_mode: 'MarkdownV2',
+            ...Markup.inlineKeyboard(buttons)
+        });
+    } catch (err) {
+        console.error(err);
+        await ctx.answerCbQuery('Error al cargar la edición de la orden');
+    }
+});
+
+bot.action(/rm_itm_(.+)/, async (ctx) => {
+    const itemId = ctx.match[1];
+
+    try {
+        const item = await prisma.orderItem.findUnique({ where: { id: itemId }, include: { order: { include: { table: true } } } });
+        if (!item) return ctx.answerCbQuery('El producto ya fue eliminado', { show_alert: true });
+
+        // Delete item
+        await prisma.orderItem.delete({ where: { id: itemId } });
+
+        // Update order total
+        const updatedOrder = await prisma.order.update({
+            where: { id: item.orderId },
+            data: { total: { decrement: item.price } },
+            include: { items: { orderBy: { createdAt: 'asc' } }, table: true }
+        });
+
+        await ctx.answerCbQuery(`🗑️ ${item.name} eliminado.`);
+
+        // Rerender edit order menu
+        let msg = `✏️ *Editando Cuenta Mesa ${escapeMarkdownV2(updatedOrder.table.number)}*\n✅ Eliminado: ${escapeMarkdownV2(item.name)}\nSelecciona otro producto para eliminarlo:\n\n`;
+        const buttons: any[] = [];
+
+        if (updatedOrder.items.length === 0) {
+            msg += '\\- Ninguno aún\n';
+        } else {
+            for (const currentItem of updatedOrder.items) {
+                const itemName = currentItem.name.length > 20 ? currentItem.name.substring(0, 20) + '...' : currentItem.name;
+                buttons.push([Markup.button.callback(`❌ Eliminar ${itemName} ($${currentItem.price.toFixed(2)})`, `rm_itm_${currentItem.id}`)]);
+            }
+        }
+
+        buttons.push([Markup.button.callback('⬅️ Volver a la cuenta', `select_table_${updatedOrder.table.id}`)]);
+
+        await ctx.editMessageText(msg, {
+            parse_mode: 'MarkdownV2',
+            ...Markup.inlineKeyboard(buttons)
+        });
+
+    } catch (err) {
+        console.error(err);
+        await ctx.answerCbQuery('Error al eliminar el producto');
     }
 });
 
