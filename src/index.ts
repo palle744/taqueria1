@@ -404,6 +404,21 @@ bot.command('new_order', requireRole(['ADMIN', 'MESERO']), async (ctx) => {
     }
 });
 
+bot.action('list_tables', async (ctx) => {
+    try {
+        const tables = await prisma.table.findMany({ orderBy: { number: 'asc' } });
+        if (tables.length === 0) {
+            return ctx.editMessageText('No hay mesas configuradas en el sistema. Usa /admin_panel para agregar mesas primero.');
+        }
+
+        const buttons = tables.map(t => [Markup.button.callback(`Mesa ${t.number} - ${t.status === 'AVAILABLE' ? 'Libre' : 'Ocupada'}`, `select_table_${t.id}`)]);
+        await ctx.editMessageText('🍽️ *Nueva Orden / Ver Cuenta*\nSelecciona una mesa:', { parse_mode: 'MarkdownV2', ...Markup.inlineKeyboard(buttons) });
+    } catch (err) {
+        console.error(err);
+        await ctx.answerCbQuery('Error al cargar mesas.');
+    }
+});
+
 bot.action(/select_table_(.+)/, async (ctx) => {
     const tableId = ctx.match[1];
     const telegramId = ctx.from.id;
@@ -438,7 +453,10 @@ bot.action(/select_table_(.+)/, async (ctx) => {
 
             await ctx.editMessageText(`✅ Cuenta abierta en *Mesa ${escapeMarkdownV2(table.number)}* por ${escapeMarkdownV2(user.firstName)}\\.\nUsa el botón abajo para agregar productos\\.`, {
                 parse_mode: 'MarkdownV2',
-                ...Markup.inlineKeyboard([[Markup.button.callback('➕ Agregar Productos', `add_items_${newOrder.id}`)]])
+                ...Markup.inlineKeyboard([
+                    [Markup.button.callback('➕ Agregar Productos', `add_items_${newOrder.id}`)],
+                    [Markup.button.callback('⬅️ Volver a Todas las Mesas', 'list_tables')]
+                ])
             });
         } else {
             // Already has open order
@@ -460,7 +478,8 @@ bot.action(/select_table_(.+)/, async (ctx) => {
                 ...Markup.inlineKeyboard([
                     [Markup.button.callback('➕ Agregar Productos', `add_items_${order.id}`)],
                     [Markup.button.callback('✏️ Editar Cuenta (Eliminar)', `edit_order_${order.id}`)],
-                    [Markup.button.callback('❌ Cerrar Cuenta (Cobrar)', `close_order_${order.id}`)]
+                    [Markup.button.callback('❌ Cerrar Cuenta (Cobrar)', `close_order_${order.id}`)],
+                    [Markup.button.callback('⬅️ Volver a Todas las Mesas', 'list_tables')]
                 ])
             });
         }
@@ -633,7 +652,12 @@ bot.action(/close_order_(.+)/, async (ctx) => {
         await prisma.order.update({ where: { id: orderId }, data: { status: 'CLOSED' } });
         await prisma.table.update({ where: { id: order.tableId }, data: { status: 'AVAILABLE' } });
 
-        await ctx.editMessageText(`✅ *Cuenta de Mesa ${escapeMarkdownV2(order.table.number)} CERRADA*\n*Total cobrado:* \\$${escapeMarkdownV2(order.total.toFixed(2))}`, { parse_mode: 'MarkdownV2' });
+        await ctx.editMessageText(`✅ *Cuenta de Mesa ${escapeMarkdownV2(order.table.number)} CERRADA*\n*Total cobrado:* \\$${escapeMarkdownV2(order.total.toFixed(2))}`, {
+            parse_mode: 'MarkdownV2',
+            ...Markup.inlineKeyboard([
+                [Markup.button.callback('⬅️ Volver a Todas las Mesas', 'list_tables')]
+            ])
+        });
     } catch (err) {
         console.error(err);
         await ctx.answerCbQuery('Error al cerrar la cuenta');
