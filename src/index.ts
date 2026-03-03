@@ -1,6 +1,7 @@
 import { Telegraf, Markup } from 'telegraf';
 import { prisma } from './db';
 import * as dotenv from 'dotenv';
+import nodeHtmlToImage from 'node-html-to-image';
 dotenv.config();
 
 const bot = new Telegraf(process.env.BOT_TOKEN as string);
@@ -14,6 +15,71 @@ const configEditState = new Map<number, 'LOGO' | 'LOCATION' | 'MESSAGE'>(); // F
 // Utility function to escape MarkdownV2
 function escapeMarkdownV2(text: string | number): string {
     return String(text).replace(/[_*[\]()~`>#+\-=|{}.!]/g, '\\$&');
+}
+
+// Generate Ticket Image Function
+async function generateTicketImage(order: any, config: any): Promise<Buffer> {
+    const itemsHtml = order.items.map((item: any) => `
+        <div style="display: flex; justify-content: space-between; margin-bottom: 4px;">
+            <span>${item.quantity}x ${item.name}</span>
+            <span>$${item.price.toFixed(2)}</span>
+        </div>
+    `).join('');
+
+    const html = `
+        <html>
+            <head>
+                <style>
+                    body {
+                        font-family: 'Courier New', Courier, monospace;
+                        width: 320px;
+                        padding: 20px;
+                        background: white;
+                        color: black;
+                        margin: 0;
+                    }
+                    .text-center { text-align: center; }
+                    .font-bold { font-weight: bold; }
+                    .divider { border-bottom: 1px dashed black; margin: 10px 0; }
+                    .logo { max-width: 150px; display: block; margin: 0 auto 10px auto; }
+                </style>
+            </head>
+            <body>
+                ${config.logoUrl ? `<img src="${config.logoUrl}" class="logo" />` : ''}
+                <div class="text-center font-bold" style="font-size: 1.2em;">TICKET DE VENTA</div>
+                ${config.locationText ? `<div class="text-center" style="font-size: 0.9em; margin-bottom: 10px;">${config.locationText}</div>` : ''}
+                
+                <div class="divider"></div>
+                <div style="margin-bottom: 5px;">Mesa: ${order.table.number}</div>
+                <div style="margin-bottom: 10px;">Ticket #: ${order.id.split('-')[0].toUpperCase()}</div>
+                
+                <div class="divider"></div>
+                <div style="font-size: 0.9em;">
+                    ${itemsHtml}
+                </div>
+                
+                <div class="divider"></div>
+                <div style="display: flex; justify-content: space-between; font-size: 1.1em;" class="font-bold">
+                    <span>TOTAL:</span>
+                    <span>$${order.total.toFixed(2)}</span>
+                </div>
+                <div style="font-size: 0.9em; margin-top: 5px;">Pago: ${order.paymentMethod === 'CASH' ? 'Efectivo' : 'Tarjeta'}</div>
+                
+                <div class="divider"></div>
+                <div class="text-center" style="font-size: 0.9em; margin-top: 15px;">
+                    ${config.thankYouMessage || '¡Gracias por su compra!'}
+                </div>
+            </body>
+        </html>
+    `;
+
+    return (await nodeHtmlToImage({
+        html: html,
+        puppeteerArgs: {
+            executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
+            args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
+        }
+    })) as Buffer;
 }
 
 bot.catch((err, ctx) => {
@@ -715,11 +781,15 @@ bot.action(/close_order_(.+)/, async (ctx) => {
 bot.action(/pay_cash_(.+)/, async (ctx) => {
     const orderId = ctx.match[1];
     try {
-        const order = await prisma.order.findUnique({ where: { id: orderId }, include: { table: true } });
+        const order = await prisma.order.findUnique({ where: { id: orderId }, include: { table: true, items: true } });
         if (!order) return ctx.answerCbQuery('No se encontró la orden');
+
+        const config = await prisma.restaurantConfig.upsert({ where: { id: 1 }, update: {}, create: {} });
 
         await prisma.order.update({ where: { id: orderId }, data: { status: 'CLOSED', paymentMethod: 'CASH' } });
         await prisma.table.update({ where: { id: order.tableId }, data: { status: 'AVAILABLE' } });
+
+        order.paymentMethod = 'CASH' as any;
 
         await ctx.editMessageText(`✅ *Cuenta de Mesa ${escapeMarkdownV2(order.table.number)} CERRADA*\n*Cobrado:* \\$${escapeMarkdownV2(order.total.toFixed(2))} \\(💵 Efectivo\\)`, {
             parse_mode: 'MarkdownV2',
@@ -727,6 +797,9 @@ bot.action(/pay_cash_(.+)/, async (ctx) => {
                 [Markup.button.callback('⬅️ Volver a Todas las Mesas', 'list_tables')]
             ])
         });
+
+        const imageBuffer = await generateTicketImage(order, config);
+        await ctx.replyWithPhoto({ source: imageBuffer }, { caption: `Ticket Mesa ${order.table.number}` });
     } catch (err) {
         console.error(err);
         await ctx.answerCbQuery('Error al cerrar la cuenta en efectivo');
@@ -736,11 +809,15 @@ bot.action(/pay_cash_(.+)/, async (ctx) => {
 bot.action(/pay_card_(.+)/, async (ctx) => {
     const orderId = ctx.match[1];
     try {
-        const order = await prisma.order.findUnique({ where: { id: orderId }, include: { table: true } });
+        const order = await prisma.order.findUnique({ where: { id: orderId }, include: { table: true, items: true } });
         if (!order) return ctx.answerCbQuery('No se encontró la orden');
+
+        const config = await prisma.restaurantConfig.upsert({ where: { id: 1 }, update: {}, create: {} });
 
         await prisma.order.update({ where: { id: orderId }, data: { status: 'CLOSED', paymentMethod: 'CARD' } });
         await prisma.table.update({ where: { id: order.tableId }, data: { status: 'AVAILABLE' } });
+
+        order.paymentMethod = 'CARD' as any;
 
         await ctx.editMessageText(`✅ *Cuenta de Mesa ${escapeMarkdownV2(order.table.number)} CERRADA*\n*Cobrado:* \\$${escapeMarkdownV2(order.total.toFixed(2))} \\(💳 Tarjeta\\)`, {
             parse_mode: 'MarkdownV2',
@@ -748,6 +825,9 @@ bot.action(/pay_card_(.+)/, async (ctx) => {
                 [Markup.button.callback('⬅️ Volver a Todas las Mesas', 'list_tables')]
             ])
         });
+
+        const imageBuffer = await generateTicketImage(order, config);
+        await ctx.replyWithPhoto({ source: imageBuffer }, { caption: `Ticket Mesa ${order.table.number}` });
     } catch (err) {
         console.error(err);
         await ctx.answerCbQuery('Error al cerrar la cuenta con tarjeta');
