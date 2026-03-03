@@ -83,3 +83,11 @@ model Product {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 }
+
+model RestaurantConfig {
+  id              Int      @id @default(1)
+  logoUrl         String?
+  locationText    String?
+  thankYouMessage String?
+  updatedAt       DateTime @updatedAt
+}

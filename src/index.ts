@@ -9,6 +9,7 @@ const bot = new Telegraf(process.env.BOT_TOKEN as string);
 // Basic Error Handling
 const productAddState = new Set<number>(); // For tracking admin adding products
 const orderAddState = new Map<number, { orderId: string, tableNumber: number }>(); // For tracking active order
+const configEditState = new Map<number, 'LOGO' | 'LOCATION' | 'MESSAGE'>(); // For editing ticket config
 
 // Utility function to escape MarkdownV2
 function escapeMarkdownV2(text: string | number): string {
@@ -129,7 +130,8 @@ bot.command('admin_panel', requireRole(['ADMIN']), async (ctx) => {
         [Markup.button.callback('👥 Gestión de Roles', 'admin_roles')],
         [Markup.button.callback('🪑 Gestión de Mesas', 'admin_mesas')],
         [Markup.button.callback('🍔 Gestión de Menú', 'admin_menu')],
-        [Markup.button.callback('🧾 Cuentas Abiertas', 'admin_cuentas')]
+        [Markup.button.callback('🧾 Cuentas Abiertas', 'admin_cuentas')],
+        [Markup.button.callback('🖨️ Configuración del Ticket', 'admin_config')]
     ]);
     await ctx.reply('⚙️ *Panel de Administración*\nSelecciona una opción:', { parse_mode: 'MarkdownV2', ...adminMenu });
 });
@@ -197,7 +199,8 @@ bot.action('admin_panel_back', async (ctx) => {
         [Markup.button.callback('👥 Gestión de Roles', 'admin_roles')],
         [Markup.button.callback('🪑 Gestión de Mesas', 'admin_mesas')],
         [Markup.button.callback('🍔 Gestión de Menú', 'admin_menu')],
-        [Markup.button.callback('🧾 Cuentas Abiertas', 'admin_cuentas')]
+        [Markup.button.callback('🧾 Cuentas Abiertas', 'admin_cuentas')],
+        [Markup.button.callback('🖨️ Configuración del Ticket', 'admin_config')]
     ]);
     await ctx.editMessageText('⚙️ *Panel de Administración*\nSelecciona una opción:', { parse_mode: 'MarkdownV2', ...adminMenu });
 });
@@ -383,6 +386,52 @@ bot.action(/delete_product_(.+)/, async (ctx) => {
         console.error(err);
         await ctx.answerCbQuery('Error al eliminar producto');
     }
+});
+
+// Admin Configuration
+bot.action('admin_config', async (ctx) => {
+    try {
+        const config = await prisma.restaurantConfig.upsert({
+            where: { id: 1 },
+            update: {},
+            create: {}
+        });
+
+        const logo = config.logoUrl || 'No definido';
+        const loc = config.locationText || 'No definido';
+        const msg = config.thankYouMessage || 'No definido';
+
+        await ctx.editMessageText(`🖨️ *Configuración del Ticket*\n\n*Logo URL:* ${escapeMarkdownV2(logo)}\n*Slogan/Ubicación:* ${escapeMarkdownV2(loc)}\n*Mensaje:* ${escapeMarkdownV2(msg)}`, {
+            parse_mode: 'MarkdownV2',
+            ...Markup.inlineKeyboard([
+                [Markup.button.callback('✏️ Editar Logo', 'edit_config_logo')],
+                [Markup.button.callback('✏️ Editar Ubicación', 'edit_config_loc')],
+                [Markup.button.callback('✏️ Editar Mensaje', 'edit_config_msg')],
+                [Markup.button.callback('⬅️ Volver', 'admin_panel_back')]
+            ])
+        });
+    } catch (err) {
+        console.error(err);
+        await ctx.answerCbQuery('Error al cargar configuración');
+    }
+});
+
+bot.action('edit_config_logo', async (ctx) => {
+    configEditState.set(ctx.from.id, 'LOGO');
+    await ctx.answerCbQuery();
+    await ctx.reply('Envíame la URL de la imagen del Logo (Ej. https://mi-dominio.com/logo.png o escribe "cancelar").');
+});
+
+bot.action('edit_config_loc', async (ctx) => {
+    configEditState.set(ctx.from.id, 'LOCATION');
+    await ctx.answerCbQuery();
+    await ctx.reply('Envíame la ubicación, eslogan o encabezado del ticket (escribe "cancelar").');
+});
+
+bot.action('edit_config_msg', async (ctx) => {
+    configEditState.set(ctx.from.id, 'MESSAGE');
+    await ctx.answerCbQuery();
+    await ctx.reply('Envíame el mensaje de agradecimiento para el ticket (escribe "cancelar").');
 });
 
 bot.command('sales_report', requireRole(['ADMIN', 'CONTADOR']), async (ctx) => {
@@ -710,6 +759,32 @@ bot.on('message', async (ctx, next) => {
 
     if (ctx.message && 'text' in ctx.message) {
         const text = ctx.message.text.trim();
+
+        if (configEditState.has(telegramId)) {
+            const editMode = configEditState.get(telegramId);
+            if (text.toLowerCase() === 'cancelar') {
+                configEditState.delete(telegramId);
+                return ctx.reply('Edición cancelada. Usa /admin_panel y entra a Configuración para continuar.');
+            }
+
+            try {
+                if (editMode === 'LOGO') {
+                    await prisma.restaurantConfig.upsert({ where: { id: 1 }, update: { logoUrl: text }, create: { logoUrl: text } });
+                    await ctx.reply('Logo actualizado exitosamente.');
+                } else if (editMode === 'LOCATION') {
+                    await prisma.restaurantConfig.upsert({ where: { id: 1 }, update: { locationText: text }, create: { locationText: text } });
+                    await ctx.reply('Ubicación actualizada exitosamente.');
+                } else if (editMode === 'MESSAGE') {
+                    await prisma.restaurantConfig.upsert({ where: { id: 1 }, update: { thankYouMessage: text }, create: { thankYouMessage: text } });
+                    await ctx.reply('Mensaje de agradecimiento actualizado exitosamente.');
+                }
+                configEditState.delete(telegramId);
+            } catch (err) {
+                console.error(err);
+                await ctx.reply('Error al actualizar configuración.');
+            }
+            return;
+        }
 
         if (productAddState.has(telegramId)) {
             if (text.toLowerCase() === 'cancelar') {
