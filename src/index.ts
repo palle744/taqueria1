@@ -514,13 +514,38 @@ bot.action('edit_config_msg', async (ctx) => {
     await ctx.reply('Envíame el mensaje de agradecimiento para el ticket (escribe "cancelar").');
 });
 
-bot.command('sales_report', requireRole(['ADMIN', 'CONTADOR']), async (ctx) => {
-    await ctx.reply('Generando reporte de ventas...\n(Logica de base de datos de ventas irá aquí).');
-});
+async function handleSalesReport(ctx: any) {
+    try {
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
 
-bot.hears('📊 Reporte de Ventas', requireRole(['ADMIN', 'CONTADOR']), async (ctx) => {
-    await ctx.reply('Generando reporte de ventas...\n(Logica de base de datos de ventas irá aquí).');
-});
+        const closedOrders = await prisma.order.findMany({
+            where: {
+                status: 'CLOSED',
+                updatedAt: { gte: today }
+            }
+        });
+
+        const totalCash = closedOrders.filter(o => o.paymentMethod === 'CASH').reduce((acc, curr) => acc + curr.total, 0);
+        const totalCard = closedOrders.filter(o => o.paymentMethod === 'CARD').reduce((acc, curr) => acc + curr.total, 0);
+        const total = totalCash + totalCard;
+
+        let reportMessage = `📊 *Reporte de Ventas \\(Hoy\\)*\n\n`;
+        reportMessage += `💵 *Efectivo:* \\$${escapeMarkdownV2(totalCash.toFixed(2))}\n`;
+        reportMessage += `💳 *Tarjeta:* \\$${escapeMarkdownV2(totalCard.toFixed(2))}\n`;
+        reportMessage += `\\-\\-\\-\\-\\-\\-\\-\\-\\-\\-\\-\\-\\-\\-\\-\\-\\n`;
+        reportMessage += `💰 *Total del Día:* \\$${escapeMarkdownV2(total.toFixed(2))}\n\n`;
+        reportMessage += `_Total de cuentas cerradas:_ ${closedOrders.length}`;
+
+        await ctx.replyWithMarkdownV2(reportMessage);
+    } catch (err) {
+        console.error(err);
+        await ctx.reply('Error al generar el reporte de ventas.');
+    }
+}
+
+bot.command('sales_report', requireRole(['ADMIN', 'CONTADOR']), handleSalesReport);
+bot.hears('📊 Reporte de Ventas', requireRole(['ADMIN', 'CONTADOR']), handleSalesReport);
 
 async function handleNewOrderFlow(ctx: any) {
     try {
