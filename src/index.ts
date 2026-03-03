@@ -523,6 +523,14 @@ async function handleSalesReport(ctx: any) {
             where: {
                 status: 'CLOSED',
                 updatedAt: { gte: today }
+            },
+            include: {
+                user: true,
+                closedBy: true,
+                table: true
+            },
+            orderBy: {
+                closedAt: 'asc'
             }
         });
 
@@ -531,10 +539,24 @@ async function handleSalesReport(ctx: any) {
         const total = totalCash + totalCard;
 
         let reportMessage = `📊 *Reporte de Ventas \\(Hoy\\)*\n\n`;
-        reportMessage += `💵 *Efectivo:* \\$${escapeMarkdownV2(totalCash.toFixed(2))}\n`;
-        reportMessage += `💳 *Tarjeta:* \\$${escapeMarkdownV2(totalCard.toFixed(2))}\n`;
+
+        if (closedOrders.length > 0) {
+            reportMessage += `*Desglose de Tickets:*\n`;
+            for (const order of closedOrders) {
+                const timeStr = order.closedAt ? order.closedAt.toTimeString().split(' ')[0] : 'N/A';
+                const openName = escapeMarkdownV2(order.user.firstName);
+                const closeName = order.closedBy ? escapeMarkdownV2(order.closedBy.firstName) : 'N/A';
+                const methodStr = order.paymentMethod === 'CASH' ? 'Efectivo' : 'Tarjeta';
+
+                reportMessage += `\\- Mesa ${escapeMarkdownV2(order.table.number)} \\| \\$${escapeMarkdownV2(order.total.toFixed(2))} \\(${methodStr}\\)\n`;
+                reportMessage += `  🕒 ${escapeMarkdownV2(timeStr)} \\| Abrió: ${openName} \\| Cobró: ${closeName}\n\n`;
+            }
+        }
+
         reportMessage += `\\-\\-\\-\\-\\-\\-\\-\\-\\-\\-\\-\\-\\-\\-\\-\\-\\n`;
-        reportMessage += `💰 *Total del Día:* \\$${escapeMarkdownV2(total.toFixed(2))}\n\n`;
+        reportMessage += `💵 *Total Efectivo:* \\$${escapeMarkdownV2(totalCash.toFixed(2))}\n`;
+        reportMessage += `💳 *Total Tarjeta:* \\$${escapeMarkdownV2(totalCard.toFixed(2))}\n`;
+        reportMessage += `💰 *Gran Total:* \\$${escapeMarkdownV2(total.toFixed(2))}\n\n`;
         reportMessage += `_Total de cuentas cerradas:_ ${closedOrders.length}`;
 
         await ctx.replyWithMarkdownV2(reportMessage);
@@ -862,13 +884,23 @@ bot.action(/close_order_(.+)/, async (ctx) => {
 
 bot.action(/pay_cash_(.+)/, async (ctx) => {
     const orderId = ctx.match[1];
+    const telegramId = ctx.from.id;
     try {
         const order = await prisma.order.findUnique({ where: { id: orderId }, include: { table: true, items: true } });
-        if (!order) return ctx.answerCbQuery('No se encontró la orden');
+        const user = await prisma.user.findUnique({ where: { telegramId } });
+        if (!order || !user) return ctx.answerCbQuery('Error al identificar usuario u orden');
 
         const config = await prisma.restaurantConfig.upsert({ where: { id: 1 }, update: {}, create: {} });
 
-        await prisma.order.update({ where: { id: orderId }, data: { status: 'CLOSED', paymentMethod: 'CASH' } });
+        await prisma.order.update({
+            where: { id: orderId },
+            data: {
+                status: 'CLOSED',
+                paymentMethod: 'CASH',
+                closedById: user.id,
+                closedAt: new Date()
+            }
+        });
         await prisma.table.update({ where: { id: order.tableId }, data: { status: 'AVAILABLE' } });
 
         order.paymentMethod = 'CASH' as any;
@@ -890,13 +922,23 @@ bot.action(/pay_cash_(.+)/, async (ctx) => {
 
 bot.action(/pay_card_(.+)/, async (ctx) => {
     const orderId = ctx.match[1];
+    const telegramId = ctx.from.id;
     try {
         const order = await prisma.order.findUnique({ where: { id: orderId }, include: { table: true, items: true } });
-        if (!order) return ctx.answerCbQuery('No se encontró la orden');
+        const user = await prisma.user.findUnique({ where: { telegramId } });
+        if (!order || !user) return ctx.answerCbQuery('Error al identificar usuario u orden');
 
         const config = await prisma.restaurantConfig.upsert({ where: { id: 1 }, update: {}, create: {} });
 
-        await prisma.order.update({ where: { id: orderId }, data: { status: 'CLOSED', paymentMethod: 'CARD' } });
+        await prisma.order.update({
+            where: { id: orderId },
+            data: {
+                status: 'CLOSED',
+                paymentMethod: 'CARD',
+                closedById: user.id,
+                closedAt: new Date()
+            }
+        });
         await prisma.table.update({ where: { id: order.tableId }, data: { status: 'AVAILABLE' } });
 
         order.paymentMethod = 'CARD' as any;
