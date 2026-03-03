@@ -559,7 +559,11 @@ async function handleSalesReport(ctx: any) {
         reportMessage += `💰 *Gran Total:* \\$${escapeMarkdownV2(total.toFixed(2))}\n\n`;
         reportMessage += `_Total de cuentas cerradas:_ ${closedOrders.length}`;
 
-        await ctx.replyWithMarkdownV2(reportMessage);
+        const keyboard = Markup.inlineKeyboard([
+            [Markup.button.callback('⬇️ Exportar CSV', 'export_sales_csv')]
+        ]);
+
+        await ctx.replyWithMarkdownV2(reportMessage, keyboard);
     } catch (err) {
         console.error(err);
         await ctx.reply('Error al generar el reporte de ventas.');
@@ -568,6 +572,58 @@ async function handleSalesReport(ctx: any) {
 
 bot.command('sales_report', requireRole(['ADMIN', 'CONTADOR']), handleSalesReport);
 bot.hears('📊 Reporte de Ventas', requireRole(['ADMIN', 'CONTADOR']), handleSalesReport);
+
+bot.action('export_sales_csv', async (ctx) => {
+    try {
+        const telegramId = ctx.from.id;
+        const user = await prisma.user.findUnique({ where: { telegramId } });
+        if (!user || !['ADMIN', 'CONTADOR'].includes(user.role)) {
+            return ctx.answerCbQuery('No tienes permisos para exportar este reporte.', { show_alert: true });
+        }
+
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
+
+        const closedOrders = await prisma.order.findMany({
+            where: {
+                status: 'CLOSED',
+                updatedAt: { gte: today }
+            },
+            include: {
+                user: true,
+                closedBy: true,
+                table: true
+            },
+            orderBy: {
+                closedAt: 'asc'
+            }
+        });
+
+        if (closedOrders.length === 0) {
+            return ctx.answerCbQuery('No hay ventas hoy para exportar.', { show_alert: true });
+        }
+
+        let csvData = 'ID Orden,Mesa,Total,Metodo Pago,Fecha Cierre,Hora Cierre,Abierta Por,Cobrada Por\n';
+        for (const order of closedOrders) {
+            const dateStr = order.closedAt ? order.closedAt.toISOString().split('T')[0] : 'N/A';
+            const timeStr = order.closedAt ? order.closedAt.toTimeString().split(' ')[0] : 'N/A';
+            const openName = order.user.firstName || 'N/A';
+            const closeName = order.closedBy ? order.closedBy.firstName : 'N/A';
+            const methodStr = order.paymentMethod === 'CASH' ? 'Efectivo' : 'Tarjeta';
+
+            csvData += `"${order.id}","${order.table.number}","${order.total.toFixed(2)}","${methodStr}","${dateStr}","${timeStr}","${openName}","${closeName}"\n`;
+        }
+
+        const buffer = Buffer.from(csvData, 'utf-8');
+        const filename = `Reporte_Ventas_${today.toISOString().split('T')[0]}.csv`;
+
+        await ctx.replyWithDocument({ source: buffer, filename: filename });
+        await ctx.answerCbQuery('CSV Exportado');
+    } catch (err) {
+        console.error(err);
+        await ctx.answerCbQuery('Error al exportar reporte.');
+    }
+});
 
 async function handleNewOrderFlow(ctx: any) {
     try {
