@@ -291,6 +291,43 @@ bot.action('admin_cuentas', async (ctx) => {
     }
 });
 
+bot.action(/view_order_(.+)/, async (ctx) => {
+    const orderId = ctx.match[1];
+    try {
+        const order = await prisma.order.findUnique({
+            where: { id: orderId },
+            include: { items: true, table: true, user: true }
+        });
+
+        if (!order) return ctx.answerCbQuery('Cuenta no encontrada');
+
+        let msg = `🧾 *Cuenta Mesa ${escapeMarkdownV2(order.table.number)}*\nAbierta por: ${escapeMarkdownV2(order.user.firstName)}\n\n*Productos:*\n`;
+
+        if (order.items.length === 0) {
+            msg += '\\- Ninguno aún\n';
+        } else {
+            order.items.forEach(item => {
+                const itemName = escapeMarkdownV2(item.name);
+                msg += `\\- ${itemName} x${item.quantity} \\(\\$${escapeMarkdownV2(item.price.toFixed(2))}\\)\n`;
+            });
+        }
+        msg += `\n*TOTAL:* \\$${escapeMarkdownV2(order.total.toFixed(2))}`;
+
+        await ctx.editMessageText(msg, {
+            parse_mode: 'MarkdownV2',
+            ...Markup.inlineKeyboard([
+                [Markup.button.callback('➕ Agregar Productos', `add_items_${order.id}`)],
+                [Markup.button.callback('✏️ Editar Cuenta (Eliminar)', `edit_order_${order.id}`)],
+                [Markup.button.callback('❌ Cerrar Cuenta (Cobrar)', `close_order_${order.id}`)],
+                [Markup.button.callback('⬅️ Volver a Admin', `admin_cuentas`)]
+            ])
+        });
+    } catch (err) {
+        console.error(err);
+        await ctx.answerCbQuery('Error al cargar la cuenta');
+    }
+});
+
 // Menu Management
 bot.action('admin_menu', async (ctx) => {
     productAddState.delete(ctx.from.id);
