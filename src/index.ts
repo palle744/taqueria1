@@ -649,10 +649,30 @@ bot.action(/close_order_(.+)/, async (ctx) => {
         const order = await prisma.order.findUnique({ where: { id: orderId }, include: { table: true } });
         if (!order) return ctx.answerCbQuery('No se encontró la orden');
 
-        await prisma.order.update({ where: { id: orderId }, data: { status: 'CLOSED' } });
+        await ctx.editMessageText(`💰 *Cobrar Mesa ${escapeMarkdownV2(order.table.number)}*\n*Total:* \\$${escapeMarkdownV2(order.total.toFixed(2))}\n\n¿Método de pago?`, {
+            parse_mode: 'MarkdownV2',
+            ...Markup.inlineKeyboard([
+                [Markup.button.callback('💵 Efectivo', `pay_cash_${order.id}`)],
+                [Markup.button.callback('💳 Tarjeta', `pay_card_${order.id}`)],
+                [Markup.button.callback('⬅️ Volver a la cuenta', `select_table_${order.table.id}`)]
+            ])
+        });
+    } catch (err) {
+        console.error(err);
+        await ctx.answerCbQuery('Error al preparar cobro');
+    }
+});
+
+bot.action(/pay_cash_(.+)/, async (ctx) => {
+    const orderId = ctx.match[1];
+    try {
+        const order = await prisma.order.findUnique({ where: { id: orderId }, include: { table: true } });
+        if (!order) return ctx.answerCbQuery('No se encontró la orden');
+
+        await prisma.order.update({ where: { id: orderId }, data: { status: 'CLOSED', paymentMethod: 'CASH' } });
         await prisma.table.update({ where: { id: order.tableId }, data: { status: 'AVAILABLE' } });
 
-        await ctx.editMessageText(`✅ *Cuenta de Mesa ${escapeMarkdownV2(order.table.number)} CERRADA*\n*Total cobrado:* \\$${escapeMarkdownV2(order.total.toFixed(2))}`, {
+        await ctx.editMessageText(`✅ *Cuenta de Mesa ${escapeMarkdownV2(order.table.number)} CERRADA*\n*Cobrado:* \\$${escapeMarkdownV2(order.total.toFixed(2))} \\(💵 Efectivo\\)`, {
             parse_mode: 'MarkdownV2',
             ...Markup.inlineKeyboard([
                 [Markup.button.callback('⬅️ Volver a Todas las Mesas', 'list_tables')]
@@ -660,7 +680,28 @@ bot.action(/close_order_(.+)/, async (ctx) => {
         });
     } catch (err) {
         console.error(err);
-        await ctx.answerCbQuery('Error al cerrar la cuenta');
+        await ctx.answerCbQuery('Error al cerrar la cuenta en efectivo');
+    }
+});
+
+bot.action(/pay_card_(.+)/, async (ctx) => {
+    const orderId = ctx.match[1];
+    try {
+        const order = await prisma.order.findUnique({ where: { id: orderId }, include: { table: true } });
+        if (!order) return ctx.answerCbQuery('No se encontró la orden');
+
+        await prisma.order.update({ where: { id: orderId }, data: { status: 'CLOSED', paymentMethod: 'CARD' } });
+        await prisma.table.update({ where: { id: order.tableId }, data: { status: 'AVAILABLE' } });
+
+        await ctx.editMessageText(`✅ *Cuenta de Mesa ${escapeMarkdownV2(order.table.number)} CERRADA*\n*Cobrado:* \\$${escapeMarkdownV2(order.total.toFixed(2))} \\(💳 Tarjeta\\)`, {
+            parse_mode: 'MarkdownV2',
+            ...Markup.inlineKeyboard([
+                [Markup.button.callback('⬅️ Volver a Todas las Mesas', 'list_tables')]
+            ])
+        });
+    } catch (err) {
+        console.error(err);
+        await ctx.answerCbQuery('Error al cerrar la cuenta con tarjeta');
     }
 });
 

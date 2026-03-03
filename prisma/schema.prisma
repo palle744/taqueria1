@@ -45,17 +45,24 @@ enum OrderStatus {
   CLOSED
 }
 
+enum PaymentMethod {
+  CASH
+  CARD
+  UNKNOWN
+}
+
 model Order {
-  id        String      @id @default(uuid())
-  tableId   String
-  table     Table       @relation(fields: [tableId], references: [id])
-  userId    String
-  user      User        @relation(fields: [userId], references: [id])
-  status    OrderStatus @default(OPEN)
-  total     Float       @default(0.0)
-  items     OrderItem[]
-  createdAt DateTime    @default(now())
-  updatedAt DateTime    @updatedAt
+  id            String        @id @default(uuid())
+  tableId       String
+  table         Table         @relation(fields: [tableId], references: [id])
+  userId        String
+  user          User          @relation(fields: [userId], references: [id])
+  status        OrderStatus   @default(OPEN)
+  total         Float         @default(0.0)
+  paymentMethod PaymentMethod @default(UNKNOWN)
+  items         OrderItem[]
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
 }
 
 model OrderItem {
