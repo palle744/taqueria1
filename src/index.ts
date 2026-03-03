@@ -17,6 +17,20 @@ function escapeMarkdownV2(text: string | number): string {
     return String(text).replace(/[_*[\]()~`>#+\-=|{}.!]/g, '\\$&');
 }
 
+// Main Reply Keyboard
+function getMainKeyboard(role: string) {
+    const buttons = [];
+    if (role === 'ADMIN') {
+        buttons.push(['📝 Nueva Orden / Ver Mesa'], ['⚙️ Panel de Administración', '📊 Reporte de Ventas']);
+    } else if (role === 'MESERO') {
+        buttons.push(['📝 Nueva Orden / Ver Mesa']);
+    } else if (role === 'CONTADOR') {
+        buttons.push(['📊 Reporte de Ventas']);
+    }
+    buttons.push(['❓ Ayuda']);
+    return Markup.keyboard(buttons).resize();
+}
+
 // Generate Ticket Image Function
 async function generateTicketImage(order: any, config: any): Promise<Buffer> {
     const itemsHtml = order.items.map((item: any) => `
@@ -109,9 +123,9 @@ bot.start(async (ctx) => {
             });
 
             if (isFirst) {
-                await ctx.reply(`¡Hola ${firstName}! Has sido registrado como ADMIN del sistema. Usa /help para ver tus comandos.`);
+                await ctx.reply(`¡Hola ${firstName}! Has sido registrado como ADMIN del sistema. Usa los botones de abajo o /help.`, getMainKeyboard('ADMIN'));
             } else {
-                await ctx.reply(`¡Hola ${firstName}! Tu cuenta está en estado PENDIENTE. Un administrador debe aprobarte.`);
+                await ctx.reply(`¡Hola ${firstName}! Tu cuenta está en estado PENDIENTE. Un administrador debe aprobarte.`, Markup.removeKeyboard());
                 // Notify Admins
                 const admins = await prisma.user.findMany({ where: { role: 'ADMIN' } });
                 const adminKeyboard = Markup.inlineKeyboard([
@@ -133,7 +147,7 @@ bot.start(async (ctx) => {
                 }
             }
         } else {
-            await ctx.reply(`¡Hola de nuevo, ${firstName}! Tu rol actual es: ${user.role}`);
+            await ctx.reply(`¡Hola de nuevo, ${firstName}! Tu rol actual es: ${user.role}`, getMainKeyboard(user.role));
         }
     } catch (error) {
         console.error(error);
@@ -150,7 +164,7 @@ bot.action(/approve_mesero_(.+)/, async (ctx) => {
             data: { role: 'MESERO' }
         });
         await ctx.editMessageText(`Usuario ${updatedUser.firstName} (@${updatedUser.username}) ha sido asignado como MESERO.`);
-        await ctx.telegram.sendMessage(Number(updatedUser.telegramId), '¡Felicidades! Un administrador te ha asignado el rol de MESERO. Ya puedes usar los comandos correspondientes.');
+        await ctx.telegram.sendMessage(Number(updatedUser.telegramId), '¡Felicidades! Un administrador te ha asignado el rol de MESERO. Ya puedes usar los botones correspondientes.', getMainKeyboard('MESERO'));
     } catch (err) {
         console.error(err);
         await ctx.answerCbQuery('Error al asignar el rol.');
@@ -165,7 +179,7 @@ bot.action(/approve_contador_(.+)/, async (ctx) => {
             data: { role: 'CONTADOR' }
         });
         await ctx.editMessageText(`Usuario ${updatedUser.firstName} (@${updatedUser.username}) ha sido asignado como CONTADOR.`);
-        await ctx.telegram.sendMessage(Number(updatedUser.telegramId), '¡Felicidades! Un administrador te ha asignado el rol de CONTADOR. Ya puedes usar los comandos correspondientes.');
+        await ctx.telegram.sendMessage(Number(updatedUser.telegramId), '¡Felicidades! Un administrador te ha asignado el rol de CONTADOR. Ya puedes usar los botones correspondientes.', getMainKeyboard('CONTADOR'));
     } catch (err) {
         console.error(err);
         await ctx.answerCbQuery('Error al asignar el rol.');
@@ -180,7 +194,7 @@ bot.action(/reject_(.+)/, async (ctx) => {
             data: { role: 'REJECTED' }
         });
         await ctx.editMessageText(`Usuario ${updatedUser.firstName} (@${updatedUser.username}) ha sido RECHAZADO.`);
-        await ctx.telegram.sendMessage(Number(updatedUser.telegramId), 'Lo sentimos, tu solicitud ha sido rechazada por el administrador.');
+        await ctx.telegram.sendMessage(Number(updatedUser.telegramId), 'Lo sentimos, tu solicitud ha sido rechazada por el administrador.', Markup.removeKeyboard());
     } catch (err) {
         console.error(err);
         await ctx.answerCbQuery('Error al rechazar usuario.');
@@ -504,11 +518,15 @@ bot.command('sales_report', requireRole(['ADMIN', 'CONTADOR']), async (ctx) => {
     await ctx.reply('Generando reporte de ventas...\n(Logica de base de datos de ventas irá aquí).');
 });
 
-bot.command('new_order', requireRole(['ADMIN', 'MESERO']), async (ctx) => {
+bot.hears('📊 Reporte de Ventas', requireRole(['ADMIN', 'CONTADOR']), async (ctx) => {
+    await ctx.reply('Generando reporte de ventas...\n(Logica de base de datos de ventas irá aquí).');
+});
+
+async function handleNewOrderFlow(ctx: any) {
     try {
         const tables = await prisma.table.findMany({ orderBy: { number: 'asc' } });
         if (tables.length === 0) {
-            return ctx.reply('No hay mesas configuradas en el sistema. Usa /admin_panel para agregar mesas primero.');
+            return ctx.reply('No hay mesas configuradas en el sistema. Usa Panel de Administración para agregar mesas primero.');
         }
 
         const buttons = tables.map(t => [Markup.button.callback(`Mesa ${t.number} - ${t.status === 'AVAILABLE' ? 'Libre' : 'Ocupada'}`, `select_table_${t.id}`)]);
@@ -517,7 +535,46 @@ bot.command('new_order', requireRole(['ADMIN', 'MESERO']), async (ctx) => {
         console.error(err);
         await ctx.reply('Error al cargar mesas.');
     }
+}
+
+bot.command('new_order', requireRole(['ADMIN', 'MESERO']), handleNewOrderFlow);
+bot.hears('📝 Nueva Orden / Ver Mesa', requireRole(['ADMIN', 'MESERO']), handleNewOrderFlow);
+
+bot.hears('⚙️ Panel de Administración', requireRole(['ADMIN']), async (ctx) => {
+    const adminMenu = Markup.inlineKeyboard([
+        [Markup.button.callback('👥 Gestión de Roles', 'admin_roles')],
+        [Markup.button.callback('🪑 Gestión de Mesas', 'admin_mesas')],
+        [Markup.button.callback('🍔 Gestión de Menú', 'admin_menu')],
+        [Markup.button.callback('🧾 Cuentas Abiertas', 'admin_cuentas')],
+        [Markup.button.callback('🖨️ Configuración del Ticket', 'admin_config')]
+    ]);
+    await ctx.reply('⚙️ *Panel de Administración*\nSelecciona una opción:', { parse_mode: 'MarkdownV2', ...adminMenu });
 });
+
+bot.hears('❓ Ayuda', async (ctx) => {
+    // Calling the help logic
+    helpCommandLogic(ctx);
+});
+
+async function helpCommandLogic(ctx: any) {
+    const telegramId = ctx.from.id;
+    try {
+        const user = await prisma.user.findUnique({ where: { telegramId } });
+        if (!user) {
+            return ctx.reply('No estás registrado. Escribe /start para comenzar.');
+        }
+
+        let helpMessage = '📋 *Comandos Disponibles*\n\n';
+        helpMessage += 'Usa los botones en la parte inferior de tu pantalla para navegar de forma rápida\\.\n';
+
+        await ctx.replyWithMarkdownV2(helpMessage, getMainKeyboard(user.role));
+    } catch (err) {
+        console.error(err);
+        await ctx.reply('Error al obtener la ayuda.');
+    }
+}
+
+bot.command('help', helpCommandLogic);
 
 bot.action('list_tables', async (ctx) => {
     try {
@@ -906,36 +963,6 @@ bot.on('message', async (ctx, next) => {
     }
 
     return next();
-});
-
-bot.command('help', async (ctx) => {
-    const telegramId = ctx.from.id;
-    try {
-        const user = await prisma.user.findUnique({ where: { telegramId } });
-        if (!user) {
-            return ctx.reply('No estás registrado. Escribe /start para comenzar.');
-        }
-
-        let helpMessage = '📋 *Comandos Disponibles*\n\n';
-        helpMessage += '/start \\- Iniciar el bot\n';
-
-        if (user.role === 'ADMIN') {
-            helpMessage += '/admin\\_panel \\- Panel de Administración\n';
-            helpMessage += '/sales\\_report \\- Reporte de ventas\n';
-            helpMessage += '/new\\_order \\- Crear nueva orden\n';
-        } else if (user.role === 'CONTADOR') {
-            helpMessage += '/sales\\_report \\- Reporte de ventas\n';
-        } else if (user.role === 'MESERO') {
-            helpMessage += '/new\\_order \\- Crear nueva orden\n';
-        } else if (user.role === 'PENDING') {
-            helpMessage += '\nTu cuenta está pendiente de aprobación\\. No tienes comandos adicionales aún\\.';
-        }
-
-        await ctx.replyWithMarkdownV2(helpMessage);
-    } catch (err) {
-        console.error(err);
-        await ctx.reply('Error al obtener la ayuda.');
-    }
 });
 
 // Start bot
