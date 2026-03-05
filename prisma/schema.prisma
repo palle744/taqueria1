@@ -27,6 +27,7 @@ model User {
   updatedAt    DateTime @updatedAt
   orders       Order[]  @relation("OrderWaiter")
   closedOrders Order[]  @relation("OrderCloser")
+  clientOrders Order[]  @relation("OrderClient")
 }
 
 enum TableStatus {
@@ -60,6 +61,8 @@ model Order {
   table         Table         @relation(fields: [tableId], references: [id])
   userId        String
   user          User          @relation("OrderWaiter", fields: [userId], references: [id])
+  clientId      String?
+  client        User?         @relation("OrderClient", fields: [clientId], references: [id])
   status        OrderStatus   @default(OPEN)
   total         Float         @default(0.0)
   paymentMethod PaymentMethod @default(UNKNOWN)

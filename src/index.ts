@@ -2,6 +2,7 @@ import { Telegraf, Markup } from 'telegraf';
 import { prisma } from './db';
 import * as dotenv from 'dotenv';
 import nodeHtmlToImage from 'node-html-to-image';
+import { Parser } from 'json2csv';
 dotenv.config();
 
 const bot = new Telegraf(process.env.BOT_TOKEN as string);
@@ -329,13 +330,90 @@ bot.action('admin_clientes', async (ctx) => {
             return;
         }
 
-        const buttons = clients.map(c => [Markup.button.callback(`❌ Eliminar: ${c.firstName} (${c.phone || 'Sin tel'})`, `delete_client_${c.id}`)]);
+        const buttons = clients.map(c => [Markup.button.callback(`👤 ${c.firstName} (${c.phone || 'Sin tel'})`, `view_client_${c.id}`)]);
         buttons.push([Markup.button.callback('⬅️ Volver', 'admin_panel_back')]);
 
-        await ctx.editMessageText('👥 *Gestión de Clientes*\nSelecciona un cliente para eliminar su registro:', { parse_mode: 'Markdown', ...Markup.inlineKeyboard(buttons) });
+        await ctx.editMessageText('👥 *Gestión de Clientes*\nSelecciona un cliente para ver más detalles:', { parse_mode: 'Markdown', ...Markup.inlineKeyboard(buttons) });
     } catch (err) {
         console.error(err);
         await ctx.answerCbQuery('Error al cargar clientes');
+    }
+});
+
+bot.action(/view_client_(.+)/, async (ctx) => {
+    const clientId = ctx.match[1];
+    try {
+        const client = await prisma.user.findUnique({
+            where: { id: clientId },
+            include: { clientOrders: { where: { status: 'CLOSED' } } }
+        });
+
+        if (!client) return ctx.answerCbQuery('Cliente no encontrado');
+
+        const totalOrders = client.clientOrders.length;
+        const totalSpent = client.clientOrders.reduce((acc, sum) => acc + sum.total, 0);
+
+        let msg = `👤 *Detalles del Cliente*\n\n`;
+        msg += `*Nombre:* ${escapeMarkdownV2(client.firstName)}\n`;
+        msg += `*Teléfono:* ${client.phone ? escapeMarkdownV2(client.phone) : 'No registrado'}\n`;
+        msg += `*Username:* ${client.username ? '@' + escapeMarkdownV2(client.username) : 'No registrado'}\n`;
+        msg += `*Registro:* ${escapeMarkdownV2(client.createdAt.toLocaleDateString())}\n\n`;
+        msg += `*Historial:* ${totalOrders} pedidos cerrados\n`;
+        msg += `*Gasto Total:* \\$${escapeMarkdownV2(totalSpent.toFixed(2))}`;
+
+        const buttons = [
+            [Markup.button.callback('⬇️ Descargar Historial (CSV)', `export_client_csv_${client.id}`)],
+            [Markup.button.callback('❌ Eliminar Cliente', `delete_client_${client.id}`)],
+            [Markup.button.callback('⬅️ Volver a Lista', 'admin_clientes')]
+        ];
+
+        await ctx.editMessageText(msg, { parse_mode: 'MarkdownV2', ...Markup.inlineKeyboard(buttons) });
+    } catch (err) {
+        console.error(err);
+        await ctx.answerCbQuery('Error al cargar cliente');
+    }
+});
+
+bot.action(/export_client_csv_(.+)/, async (ctx) => {
+    const clientId = ctx.match[1];
+    try {
+        const client = await prisma.user.findUnique({
+            where: { id: clientId },
+            include: {
+                clientOrders: {
+                    where: { status: 'CLOSED' },
+                    include: { items: true, table: true }
+                }
+            }
+        });
+
+        if (!client) return ctx.answerCbQuery('Cliente no encontrado');
+        if (client.clientOrders.length === 0) return ctx.answerCbQuery('Este cliente no tiene historial de pedidos.', { show_alert: true });
+
+        const rows: any[] = [];
+        for (const order of client.clientOrders) {
+            rows.push({
+                'Fecha': order.closedAt ? order.closedAt.toLocaleDateString() : 'N/A',
+                'Mesa': order.table.number,
+                'Total': order.total.toFixed(2),
+                'Metodo Pago': order.paymentMethod === 'CASH' ? 'Efectivo' : 'Tarjeta',
+                'Productos': order.items.map(i => `${i.quantity}x ${i.name}`).join(' | ')
+            });
+        }
+
+        const parser = new Parser({ fields: ['Fecha', 'Mesa', 'Total', 'Metodo Pago', 'Productos'] });
+        const csv = parser.parse(rows);
+        const buffer = Buffer.from(csv, 'utf-8');
+
+        await ctx.telegram.sendDocument(ctx.from.id, {
+            source: buffer,
+            filename: `historial_${client.firstName.replace(/ /g, '_')}.csv`
+        });
+        await ctx.answerCbQuery('Archivo enviado por mensaje directo.');
+
+    } catch (err) {
+        console.error(err);
+        await ctx.answerCbQuery('Error al exportar historial.');
     }
 });
 
@@ -785,7 +863,7 @@ bot.action(/select_table_(.+)/, async (ctx) => {
             include: {
                 orders: {
                     where: { status: 'OPEN' },
-                    include: { items: true, user: true }
+                    include: { items: true, user: true, client: true }
                 }
             }
         });
@@ -814,7 +892,11 @@ bot.action(/select_table_(.+)/, async (ctx) => {
         } else {
             // Already has open order
             const order = table.orders[0];
-            let msg = `🧾 *Cuenta Mesa ${escapeMarkdownV2(table.number)}*\nAbierta por: ${escapeMarkdownV2(order.user.firstName)}\n\n*Productos:*\n`;
+            let msg = `🧾 *Cuenta Mesa ${escapeMarkdownV2(table.number)}*\nAbierta por: ${escapeMarkdownV2(order.user.firstName)}\n`;
+            if (order.client) {
+                msg += `Cliente: ${escapeMarkdownV2(order.client.firstName)}\n`;
+            }
+            msg += `\n*Productos:*\n`;
 
             if (order.items.length === 0) {
                 msg += '\\- Ninguno aún\n';
@@ -830,6 +912,7 @@ bot.action(/select_table_(.+)/, async (ctx) => {
                 parse_mode: 'MarkdownV2',
                 ...Markup.inlineKeyboard([
                     [Markup.button.callback('➕ Agregar Productos', `add_items_${order.id}`)],
+                    [Markup.button.callback('👤 Asignar Cliente', `assign_client_${order.id}`)],
                     [Markup.button.callback('✏️ Editar Cuenta (Eliminar)', `edit_order_${order.id}`)],
                     [Markup.button.callback('❌ Cerrar Cuenta (Cobrar)', `close_order_${order.id}`)],
                     [Markup.button.callback('⬅️ Volver a Todas las Mesas', 'list_tables')]
@@ -917,6 +1000,64 @@ bot.action(/rm_itm_(.+)/, async (ctx) => {
     } catch (err) {
         console.error(err);
         await ctx.answerCbQuery('Error al eliminar el producto');
+    }
+});
+
+bot.action(/assign_client_(.+)/, async (ctx) => {
+    const orderId = ctx.match[1];
+    try {
+        const order = await prisma.order.findUnique({ where: { id: orderId }, include: { table: true } });
+        if (!order || order.status !== 'OPEN') return ctx.answerCbQuery('La cuenta no está abierta o no existe');
+
+        const clients = await prisma.user.findMany({ where: { role: 'CLIENTE' }, orderBy: { firstName: 'asc' } });
+        if (clients.length === 0) {
+            return ctx.answerCbQuery('No hay clientes registrados en el sistema.', { show_alert: true });
+        }
+
+        const buttons = clients.map(c => [Markup.button.callback(`👤 ${c.firstName} (${c.phone || 'Sin tel'})`, `set_client_${order.id}_${c.id}`)]);
+        buttons.push([Markup.button.callback('❌ Quitar Cliente', `set_client_${order.id}_none`)]);
+        buttons.push([Markup.button.callback('⬅️ Volver a la cuenta', `select_table_${order.table.id}`)]);
+
+        await ctx.editMessageText(`👤 *Asignar Cliente a Mesa ${escapeMarkdownV2(order.table.number)}*\nSelecciona un cliente:`, {
+            parse_mode: 'MarkdownV2',
+            ...Markup.inlineKeyboard(buttons)
+        });
+    } catch (err) {
+        console.error(err);
+        await ctx.answerCbQuery('Error al cargar lista de clientes');
+    }
+});
+
+bot.action(/set_client_(.+)_(.+)/, async (ctx) => {
+    const orderId = ctx.match[1];
+    const clientId = ctx.match[2];
+
+    try {
+        const order = await prisma.order.findUnique({ where: { id: orderId }, include: { table: true } });
+        if (!order) return ctx.answerCbQuery('Orden no encontrada');
+
+        if (clientId === 'none') {
+            await prisma.order.update({ where: { id: orderId }, data: { clientId: null } });
+            await ctx.answerCbQuery('Cliente quitado de la orden');
+        } else {
+            await prisma.order.update({ where: { id: orderId }, data: { clientId } });
+            await ctx.answerCbQuery('Cliente asignado a la orden');
+        }
+
+        // Return to the table view by re-invoking the internal table load logic
+        // We'll simulate the load table action 
+        const tableId = order.table.id;
+
+        // This is a minimal refetch just to return the view back
+        await ctx.editMessageText('✅ Actualizado. Vuelve a abrir la mesa.', {
+            ...Markup.inlineKeyboard([
+                [Markup.button.callback(`Volver a la Mesa ${order.table.number}`, `select_table_${tableId}`)]
+            ])
+        });
+
+    } catch (err) {
+        console.error(err);
+        await ctx.answerCbQuery('Error al asignar el cliente');
     }
 });
 
