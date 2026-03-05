@@ -310,12 +310,57 @@ bot.action('admin_panel_back', async (ctx) => {
     productAddState.delete(ctx.from.id);
     const adminMenu = Markup.inlineKeyboard([
         [Markup.button.callback('👥 Gestión de Roles', 'admin_roles')],
+        [Markup.button.callback('👥 Gestión de Clientes', 'admin_clientes')],
         [Markup.button.callback('🪑 Gestión de Mesas', 'admin_mesas')],
         [Markup.button.callback('🍔 Gestión de Menú', 'admin_menu')],
         [Markup.button.callback('🧾 Cuentas Abiertas', 'admin_cuentas')],
         [Markup.button.callback('🖨️ Configuración del Ticket', 'admin_config')]
     ]);
     await ctx.editMessageText('⚙️ *Panel de Administración*\nSelecciona una opción:', { parse_mode: 'MarkdownV2', ...adminMenu });
+});
+
+bot.action('admin_clientes', async (ctx) => {
+    try {
+        const clients = await prisma.user.findMany({ where: { role: 'CLIENTE' }, orderBy: { firstName: 'asc' } });
+        if (clients.length === 0) {
+            await ctx.editMessageText('No hay clientes registrados.', Markup.inlineKeyboard([
+                [Markup.button.callback('⬅️ Volver', 'admin_panel_back')]
+            ]));
+            return;
+        }
+
+        const buttons = clients.map(c => [Markup.button.callback(`❌ Eliminar: ${c.firstName} (${c.phone || 'Sin tel'})`, `delete_client_${c.id}`)]);
+        buttons.push([Markup.button.callback('⬅️ Volver', 'admin_panel_back')]);
+
+        await ctx.editMessageText('👥 *Gestión de Clientes*\nSelecciona un cliente para eliminar su registro:', { parse_mode: 'Markdown', ...Markup.inlineKeyboard(buttons) });
+    } catch (err) {
+        console.error(err);
+        await ctx.answerCbQuery('Error al cargar clientes');
+    }
+});
+
+bot.action(/delete_client_(.+)/, async (ctx) => {
+    const clientId = ctx.match[1];
+    try {
+        await prisma.user.delete({ where: { id: clientId } });
+        await ctx.answerCbQuery('Cliente eliminado exitosamente', { show_alert: true });
+
+        // Refresh list
+        const clients = await prisma.user.findMany({ where: { role: 'CLIENTE' }, orderBy: { firstName: 'asc' } });
+        if (clients.length === 0) {
+            await ctx.editMessageText('No hay clientes registrados.', Markup.inlineKeyboard([
+                [Markup.button.callback('⬅️ Volver', 'admin_panel_back')]
+            ]));
+            return;
+        }
+        const buttons = clients.map(c => [Markup.button.callback(`❌ Eliminar: ${c.firstName} (${c.phone || 'Sin tel'})`, `delete_client_${c.id}`)]);
+        buttons.push([Markup.button.callback('⬅️ Volver', 'admin_panel_back')]);
+
+        await ctx.editMessageText('👥 *Gestión de Clientes*\nSelecciona un cliente para eliminar su registro:', { parse_mode: 'Markdown', ...Markup.inlineKeyboard(buttons) });
+    } catch (err) {
+        console.error(err);
+        await ctx.answerCbQuery('Error al eliminar cliente.');
+    }
 });
 
 bot.action('admin_mesas', async (ctx) => {
