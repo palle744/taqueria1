@@ -11,6 +11,7 @@ const bot = new Telegraf(process.env.BOT_TOKEN as string);
 const productAddState = new Set<number>(); // For tracking admin adding products
 const orderAddState = new Map<number, { orderId: string, tableNumber: number }>(); // For tracking active order
 const configEditState = new Map<number, 'LOGO' | 'LOCATION' | 'MESSAGE'>(); // For editing ticket config
+const clientRegState = new Set<number>(); // For tracking client phone number registration
 
 // Utility function to escape MarkdownV2
 function escapeMarkdownV2(text: string | number): string {
@@ -26,6 +27,8 @@ function getMainKeyboard(role: string) {
         buttons.push(['📝 Nueva Orden / Ver Mesa']);
     } else if (role === 'CONTADOR') {
         buttons.push(['📊 Reporte de Ventas']);
+    } else if (role === 'CLIENTE') {
+        buttons.push(['📖 Ver Menú']);
     }
     buttons.push(['❓ Ayuda']);
     return Markup.keyboard(buttons).resize();
@@ -113,38 +116,24 @@ bot.start(async (ctx) => {
             const totalUsers = await prisma.user.count();
             const isFirst = totalUsers === 0;
 
-            user = await prisma.user.create({
-                data: {
-                    telegramId,
-                    username,
-                    firstName,
-                    role: isFirst ? 'ADMIN' : 'PENDING'
-                }
-            });
-
             if (isFirst) {
+                user = await prisma.user.create({
+                    data: {
+                        telegramId,
+                        username,
+                        firstName,
+                        role: 'ADMIN' // Always ADMIN for the first user
+                    }
+                });
                 await ctx.reply(`¡Hola ${firstName}! Has sido registrado como ADMIN del sistema. Usa los botones de abajo o /help.`, getMainKeyboard('ADMIN'));
             } else {
-                await ctx.reply(`¡Hola ${firstName}! Tu cuenta está en estado PENDIENTE. Un administrador debe aprobarte.`, Markup.removeKeyboard());
-                // Notify Admins
-                const admins = await prisma.user.findMany({ where: { role: 'ADMIN' } });
-                const adminKeyboard = Markup.inlineKeyboard([
-                    [Markup.button.callback('Aprobar como Mesero', `approve_mesero_${user.id}`)],
-                    [Markup.button.callback('Aprobar como Contador', `approve_contador_${user.id}`)],
-                    [Markup.button.callback('Rechazar', `reject_${user.id}`)]
-                ]);
-
-                for (const admin of admins) {
-                    try {
-                        await ctx.telegram.sendMessage(
-                            Number(admin.telegramId),
-                            `Nuevo usuario registrado:\nNombre: ${firstName}\nUsername: @${username || 'N/A'}\nTelegram ID: ${telegramId}\n\n¿Qué rol deseas asignarle?`,
-                            adminKeyboard
-                        );
-                    } catch (e) {
-                        console.error(`Could not notify admin ${admin.telegramId}`);
-                    }
-                }
+                // If not first user, ask them who they are, don't create user until they select
+                await ctx.reply(`¡Bienvenido ${firstName}! ¿Cómo deseas registrarte?`, {
+                    ...Markup.inlineKeyboard([
+                        [Markup.button.callback('🌮 Soy Cliente', `register_client`)],
+                        [Markup.button.callback('💼 Soy Empleado', `register_staff`)]
+                    ])
+                });
             }
         } else {
             await ctx.reply(`¡Hola de nuevo, ${firstName}! Tu rol actual es: ${user.role}`, getMainKeyboard(user.role));
@@ -156,6 +145,49 @@ bot.start(async (ctx) => {
 });
 
 // Action Handlers
+bot.action('register_client', async (ctx) => {
+    const telegramId = ctx.from.id;
+    clientRegState.add(telegramId);
+    await ctx.editMessageText('¡Excelente! Por favor, envíame tu **Número de Teléfono** de contacto:', { parse_mode: 'Markdown' });
+});
+
+bot.action('register_staff', async (ctx) => {
+    const telegramId = ctx.from.id;
+    const username = ctx.from.username ?? null;
+    const firstName = ctx.from.first_name;
+
+    try {
+        const user = await prisma.user.create({
+            data: { telegramId, username, firstName, role: 'PENDING' }
+        });
+
+        await ctx.editMessageText('Tu cuenta está en estado PENDIENTE. Un administrador debe aprobarte.');
+
+        // Notify Admins
+        const admins = await prisma.user.findMany({ where: { role: 'ADMIN' } });
+        const adminKeyboard = Markup.inlineKeyboard([
+            [Markup.button.callback('Aprobar como Mesero', `approve_mesero_${user.id}`)],
+            [Markup.button.callback('Aprobar como Contador', `approve_contador_${user.id}`)],
+            [Markup.button.callback('Rechazar', `reject_${user.id}`)]
+        ]);
+
+        for (const admin of admins) {
+            try {
+                await ctx.telegram.sendMessage(
+                    Number(admin.telegramId),
+                    `Nuevo empleado quiere registrarse:\nNombre: ${firstName}\nUsername: @${username || 'N/A'}\nTelegram ID: ${telegramId}\n\n¿Qué rol deseas asignarle?`,
+                    adminKeyboard
+                );
+            } catch (e) {
+                console.error(`Could not notify admin ${admin.telegramId}`);
+            }
+        }
+    } catch (err) {
+        console.error(err);
+        await ctx.answerCbQuery('Error al registrar tu cuenta.');
+    }
+});
+
 bot.action(/approve_mesero_(.+)/, async (ctx) => {
     const targetUserId = ctx.match[1];
     try {
@@ -1019,6 +1051,29 @@ bot.on('message', async (ctx, next) => {
 
     if (ctx.message && 'text' in ctx.message) {
         const text = ctx.message.text.trim();
+
+        if (clientRegState.has(telegramId)) {
+            const username = ctx.from.username ?? null;
+            const firstName = ctx.from.first_name;
+            try {
+                await prisma.user.create({
+                    data: {
+                        telegramId,
+                        username,
+                        firstName,
+                        phone: text,
+                        role: 'CLIENTE'
+                    }
+                });
+                clientRegState.delete(telegramId);
+                await ctx.reply(`¡Registro exitoso, ${firstName}!\nTu número (${text}) ha sido guardado.`, getMainKeyboard('CLIENTE'));
+            } catch (err) {
+                console.error(err);
+                await ctx.reply('Error al registrar tus datos de cliente. Inténtalo de nuevo con /start.');
+                clientRegState.delete(telegramId);
+            }
+            return;
+        }
 
         if (configEditState.has(telegramId)) {
             const editMode = configEditState.get(telegramId);

@@ -11,15 +11,17 @@ enum Role {
   ADMIN
   MESERO
   CONTADOR
+  CLIENTE
   PENDING
   REJECTED
 }
 
 model User {
-  id         String   @id @default(uuid())
-  telegramId BigInt   @unique
-  username   String?
-  firstName  String
+  id           String   @id @default(uuid())
+  telegramId   BigInt   @unique
+  username     String?
+  firstName    String
+  phone        String?
   role         Role     @default(PENDING)
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
