@@ -29,6 +29,7 @@ function getMainKeyboard(role: string) {
         buttons.push(['📊 Reporte de Ventas']);
     } else if (role === 'CLIENTE') {
         buttons.push(['📖 Ver Menú']);
+        buttons.push(['🚪 Salir']);
     }
     buttons.push(['❓ Ayuda']);
     return Markup.keyboard(buttons).resize();
@@ -1149,6 +1150,39 @@ bot.on('message', async (ctx, next) => {
     }
 
     return next();
+});
+
+bot.hears('🚪 Salir', requireRole(['CLIENTE']), async (ctx) => {
+    const telegramId = ctx.from.id;
+    try {
+        const user = await prisma.user.findUnique({ where: { telegramId } });
+        if (user) {
+            await prisma.user.delete({ where: { id: user.id } });
+            await ctx.reply('Has salido de tu cuenta de cliente exitosamente. Si deseas registrarte de nuevo, pulsa /start.', Markup.removeKeyboard());
+        }
+    } catch (err) {
+        console.error(err);
+        await ctx.reply('Error al intentar salir de la cuenta.');
+    }
+});
+
+bot.hears('📖 Ver Menú', requireRole(['CLIENTE']), async (ctx) => {
+    try {
+        const products = await prisma.product.findMany({ orderBy: { name: 'asc' } });
+        if (products.length === 0) {
+            return ctx.reply('El menú está vacío por el momento.');
+        }
+
+        let menuMessage = `📖 *Menú del Restaurante*\n\n`;
+        for (const product of products) {
+            menuMessage += `🌮 *${escapeMarkdownV2(product.name)}*\n   \\$${escapeMarkdownV2(product.price.toFixed(2))}\n\n`;
+        }
+
+        await ctx.replyWithMarkdownV2(menuMessage);
+    } catch (err) {
+        console.error(err);
+        await ctx.reply('Error al mostrar el menú.');
+    }
 });
 
 // Start bot
