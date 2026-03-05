@@ -11,7 +11,7 @@ const bot = new Telegraf(process.env.BOT_TOKEN as string);
 const productAddState = new Set<number>(); // For tracking admin adding products
 const orderAddState = new Map<number, { orderId: string, tableNumber: number }>(); // For tracking active order
 const configEditState = new Map<number, 'LOGO' | 'LOCATION' | 'MESSAGE'>(); // For editing ticket config
-const clientRegState = new Set<number>(); // For tracking client phone number registration
+const clientRegState = new Map<number, { step: 'NAME' | 'PHONE', name?: string }>(); // For tracking client name and phone number registration
 
 // Utility function to escape MarkdownV2
 function escapeMarkdownV2(text: string | number): string {
@@ -147,8 +147,8 @@ bot.start(async (ctx) => {
 // Action Handlers
 bot.action('register_client', async (ctx) => {
     const telegramId = ctx.from.id;
-    clientRegState.add(telegramId);
-    await ctx.editMessageText('¡Excelente! Por favor, envíame tu **Número de Teléfono** de contacto:', { parse_mode: 'Markdown' });
+    clientRegState.set(telegramId, { step: 'NAME' });
+    await ctx.editMessageText('¡Excelente! Por favor, envíame tu **Nombre Completo**:', { parse_mode: 'Markdown' });
 });
 
 bot.action('register_staff', async (ctx) => {
@@ -1053,26 +1053,34 @@ bot.on('message', async (ctx, next) => {
         const text = ctx.message.text.trim();
 
         if (clientRegState.has(telegramId)) {
+            const state = clientRegState.get(telegramId)!;
             const username = ctx.from.username ?? null;
-            const firstName = ctx.from.first_name;
-            try {
-                await prisma.user.create({
-                    data: {
-                        telegramId,
-                        username,
-                        firstName,
-                        phone: text,
-                        role: 'CLIENTE'
-                    }
-                });
-                clientRegState.delete(telegramId);
-                await ctx.reply(`¡Registro exitoso, ${firstName}!\nTu número (${text}) ha sido guardado.`, getMainKeyboard('CLIENTE'));
-            } catch (err) {
-                console.error(err);
-                await ctx.reply('Error al registrar tus datos de cliente. Inténtalo de nuevo con /start.');
-                clientRegState.delete(telegramId);
+
+            if (state.step === 'NAME') {
+                clientRegState.set(telegramId, { step: 'PHONE', name: text });
+                await ctx.reply('¡Gracias! Ahora, por favor envíame tu **Número de Teléfono** de contacto:', { parse_mode: 'Markdown' });
+                return;
+            } else if (state.step === 'PHONE') {
+                const fullName = state.name || ctx.from.first_name;
+                try {
+                    await prisma.user.create({
+                        data: {
+                            telegramId,
+                            username,
+                            firstName: fullName,
+                            phone: text,
+                            role: 'CLIENTE'
+                        }
+                    });
+                    clientRegState.delete(telegramId);
+                    await ctx.reply(`¡Registro exitoso, ${fullName}!\nTu número (${text}) ha sido guardado.`, getMainKeyboard('CLIENTE'));
+                } catch (err) {
+                    console.error(err);
+                    await ctx.reply('Error al registrar tus datos de cliente. Inténtalo de nuevo con /start.');
+                    clientRegState.delete(telegramId);
+                }
+                return;
             }
-            return;
         }
 
         if (configEditState.has(telegramId)) {
