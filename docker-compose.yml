@@ -19,6 +19,8 @@ services:
       - BOT_TOKEN=8689759788:AAG2uRl5rCN8tNm3e3nYAyVWXuiZANlNs50
     depends_on:
       - db
+    ports:
+      - "3000:3000"
     restart: unless-stopped
 
 volumes:

@@ -3,6 +3,13 @@ import { prisma } from './db';
 import * as dotenv from 'dotenv';
 import nodeHtmlToImage from 'node-html-to-image';
 import { Parser } from 'json2csv';
+import multer from 'multer';
+import path from 'path';
+import express from 'express';
+import cors from 'cors';
+import { createServer } from 'http';
+import { Server } from 'socket.io';
+import fs from 'fs';
 dotenv.config();
 
 const bot = new Telegraf(process.env.BOT_TOKEN as string);
@@ -10,9 +17,29 @@ const bot = new Telegraf(process.env.BOT_TOKEN as string);
 // Basic Error Handling
 // Basic Error Handling
 const productAddState = new Set<number>(); // For tracking admin adding products
-const orderAddState = new Map<number, { orderId: string, tableNumber: number }>(); // For tracking active order
+const orderAddState = new Map<number, { orderId: string, tableNumber?: number }>(); // For tracking active order
 const configEditState = new Map<number, 'LOGO' | 'LOCATION' | 'MESSAGE'>(); // For editing ticket config
 const clientRegState = new Map<number, { step: 'NAME' | 'PHONE', name?: string }>(); // For tracking client name and phone number registration
+const waiterPickupCodeState = new Map<number, { orderId: string, paymentMethod: 'CASH' | 'CARD' }>(); // For waiter checkout validation
+const exportDateState = new Set<number>(); // For tracking users providing a date for CSV export
+const expenseState = new Map<number, { step: 'DESCRIPTION' | 'AMOUNT', description?: string }>(); // For tracking expense registration
+const waiterClientSearchState = new Map<number, { orderId: string }>(); // For waiters searching for clients
+
+// Reusable Admin Keyboard
+
+function getAdminKeyboard() {
+    return {
+        inline_keyboard: [
+            [{ text: '👥 Gestión de Roles', callback_data: 'admin_roles' }],
+            [{ text: '👥 Gestión de Clientes', callback_data: 'admin_clientes' }],
+            [{ text: '🪑 Gestión de Mesas', callback_data: 'admin_mesas' }],
+            [{ text: '🍔 Gestión de Menú', callback_data: 'admin_menu' }],
+            [{ text: '🧾 Cuentas Abiertas', callback_data: 'admin_cuentas' }],
+            [{ text: '📊 Finanzas', callback_data: 'admin_finanzas' }],
+            [{ text: '🖨️ Configuración del Ticket', callback_data: 'admin_config' }]
+        ]
+    };
+}
 
 // Utility function to escape MarkdownV2
 function escapeMarkdownV2(text: string | number): string {
@@ -20,20 +47,30 @@ function escapeMarkdownV2(text: string | number): string {
 }
 
 // Main Reply Keyboard
+
 function getMainKeyboard(role: string) {
-    const buttons = [];
+    const buttons: string[][] = [];
     if (role === 'ADMIN') {
-        buttons.push(['📝 Nueva Orden / Ver Mesa'], ['⚙️ Panel de Administración', '📊 Reporte de Ventas']);
+        buttons.push(['📝 Nueva Orden / Ver Mesa', '🥡 Para Llevar']);
+        buttons.push(['🛎️ Pedidos de Clientes']);
+        buttons.push(['🧾 Cuentas Abiertas', '⚙️ Panel de Administración', '📊 Reporte de Ventas']);
     } else if (role === 'MESERO') {
-        buttons.push(['📝 Nueva Orden / Ver Mesa']);
+        buttons.push(['📝 Nueva Orden / Ver Mesa', '🥡 Para Llevar']);
+        buttons.push(['🛎️ Pedidos de Clientes', '🧾 Cuentas Abiertas']);
     } else if (role === 'CONTADOR') {
         buttons.push(['📊 Reporte de Ventas']);
     } else if (role === 'CLIENTE') {
-        buttons.push(['📖 Ver Menú']);
-        buttons.push(['🚪 Salir']);
+        buttons.push(['🛍️ Hacer Pedido']);
+        buttons.push(['📋 Mis Pedidos', '📖 Ver Menú']);
     }
-    buttons.push(['❓ Ayuda']);
-    return Markup.keyboard(buttons).resize();
+    buttons.push(['❓ Ayuda', '🚪 Salir']);
+
+    return {
+        reply_markup: {
+            keyboard: buttons,
+            resize_keyboard: true
+        }
+    };
 }
 
 // Generate Ticket Image Function
@@ -69,8 +106,8 @@ async function generateTicketImage(order: any, config: any): Promise<Buffer> {
                 ${config.locationText ? `<div class="text-center" style="font-size: 0.9em; margin-bottom: 10px;">${config.locationText}</div>` : ''}
                 
                 <div class="divider"></div>
-                <div style="margin-bottom: 5px;">Mesa: ${order.table.number}</div>
-                <div style="margin-bottom: 10px;">Ticket #: ${order.id.split('-')[0].toUpperCase()}</div>
+                <div style="margin-bottom: 5px;">${order.table ? `Mesa: ${order.table.number}` : '<span style="background:black; color:white; padding: 2px 5px;">PARA LLEVAR</span>'}</div>
+                <div style="margin-bottom: 10px;">ID Orden: ${order.client ? order.client.firstName.toUpperCase() : (order.user ? order.user.firstName.toUpperCase() : 'APP')}-${order.pickupCode || 'N/A'}</div>
                 
                 <div class="divider"></div>
                 <div style="font-size: 0.9em;">
@@ -130,15 +167,15 @@ bot.start(async (ctx) => {
                 await ctx.reply(`¡Hola ${firstName}! Has sido registrado como ADMIN del sistema. Usa los botones de abajo o /help.`, getMainKeyboard('ADMIN'));
             } else {
                 // If not first user, ask them who they are, don't create user until they select
-                await ctx.reply(`¡Bienvenido ${firstName}! ¿Cómo deseas registrarte?`, {
-                    ...Markup.inlineKeyboard([
-                        [Markup.button.callback('🌮 Soy Cliente', `register_client`)],
-                        [Markup.button.callback('💼 Soy Empleado', `register_staff`)]
-                    ])
-                });
+                await ctx.reply(`¡Bienvenido ${firstName}! ¿Cómo deseas registrarte?`,
+                    Markup.keyboard([
+                        ['🌮 Soy Cliente', '💼 Soy Empleado']
+                    ]).oneTime().resize()
+                );
             }
         } else {
-            await ctx.reply(`¡Hola de nuevo, ${firstName}! Tu rol actual es: ${user.role}`, getMainKeyboard(user.role));
+            console.log('DEBUG KEYBOARD:', JSON.stringify(getMainKeyboard(user.role)));
+            await ctx.reply(`¡Hola de nuevo, ${firstName}! (Bot v1.0.5) Tu rol actual es: ${user.role}`, getMainKeyboard(user.role));
         }
     } catch (error) {
         console.error(error);
@@ -146,24 +183,29 @@ bot.start(async (ctx) => {
     }
 });
 
-// Action Handlers
-bot.action('register_client', async (ctx) => {
+// Registration Handlers
+bot.hears('🌮 Soy Cliente', async (ctx) => {
     const telegramId = ctx.from.id;
     clientRegState.set(telegramId, { step: 'NAME' });
-    await ctx.editMessageText('¡Excelente! Por favor, envíame tu **Nombre Completo**:', { parse_mode: 'Markdown' });
+    await ctx.reply('¡Excelente! Por favor, envíame tu **Nombre Completo**:', {
+        parse_mode: 'Markdown',
+        reply_markup: { remove_keyboard: true }
+    });
 });
 
-bot.action('register_staff', async (ctx) => {
+bot.hears('💼 Soy Empleado', async (ctx) => {
     const telegramId = ctx.from.id;
     const username = ctx.from.username ?? null;
     const firstName = ctx.from.first_name;
 
     try {
-        const user = await prisma.user.create({
-            data: { telegramId, username, firstName, role: 'PENDING' }
+        const user = await prisma.user.upsert({
+            where: { telegramId },
+            update: { username, firstName, role: 'PENDING' },
+            create: { telegramId, username, firstName, role: 'PENDING' }
         });
 
-        await ctx.editMessageText('Tu cuenta está en estado PENDIENTE. Un administrador debe aprobarte.');
+        await ctx.reply('Tu cuenta está en estado PENDIENTE. Un administrador debe aprobarte.', Markup.removeKeyboard());
 
         // Notify Admins
         const admins = await prisma.user.findMany({ where: { role: 'ADMIN' } });
@@ -186,7 +228,7 @@ bot.action('register_staff', async (ctx) => {
         }
     } catch (err) {
         console.error(err);
-        await ctx.answerCbQuery('Error al registrar tu cuenta.');
+        await ctx.reply('Error al registrar tu cuenta.');
     }
 });
 
@@ -240,20 +282,13 @@ import { requireRole } from './middleware';
 
 // Restricted commands
 bot.command('admin_panel', requireRole(['ADMIN']), async (ctx) => {
-    const adminMenu = Markup.inlineKeyboard([
-        [Markup.button.callback('👥 Gestión de Roles', 'admin_roles')],
-        [Markup.button.callback('🪑 Gestión de Mesas', 'admin_mesas')],
-        [Markup.button.callback('🍔 Gestión de Menú', 'admin_menu')],
-        [Markup.button.callback('🧾 Cuentas Abiertas', 'admin_cuentas')],
-        [Markup.button.callback('🖨️ Configuración del Ticket', 'admin_config')]
-    ]);
-    await ctx.reply('⚙️ *Panel de Administración*\nSelecciona una opción:', { parse_mode: 'MarkdownV2', ...adminMenu });
+    await ctx.reply('⚙️ *Panel de Administración*\nSelecciona una opción:', { parse_mode: 'MarkdownV2', reply_markup: getAdminKeyboard() });
 });
 
 // Admin Panel Callbacks
 bot.action('admin_roles', async (ctx) => {
     try {
-        const users = await prisma.user.findMany({ where: { role: { not: 'ADMIN' } } });
+        const users = await prisma.user.findMany({ where: { role: { notIn: ['ADMIN', 'CLIENTE'] } } });
         if (users.length === 0) {
             await ctx.editMessageText('No hay usuarios para gestionar.');
             return;
@@ -296,7 +331,7 @@ bot.action(/set_role_(.+)_(.+)/, async (ctx) => {
         await ctx.answerCbQuery(`Rol de usuario actualizado a ${newRole}`);
 
         // Return to roles menu
-        const users = await prisma.user.findMany({ where: { role: { not: 'ADMIN' } } });
+        const users = await prisma.user.findMany({ where: { role: { notIn: ['ADMIN', 'CLIENTE'] } } });
         const buttons = users.map(u => [Markup.button.callback(`${u.firstName} - ${u.role}`, `manage_user_${u.id}`)]);
         buttons.push([Markup.button.callback('⬅️ Volver', 'admin_panel_back')]);
 
@@ -309,15 +344,7 @@ bot.action(/set_role_(.+)_(.+)/, async (ctx) => {
 
 bot.action('admin_panel_back', async (ctx) => {
     productAddState.delete(ctx.from.id);
-    const adminMenu = Markup.inlineKeyboard([
-        [Markup.button.callback('👥 Gestión de Roles', 'admin_roles')],
-        [Markup.button.callback('👥 Gestión de Clientes', 'admin_clientes')],
-        [Markup.button.callback('🪑 Gestión de Mesas', 'admin_mesas')],
-        [Markup.button.callback('🍔 Gestión de Menú', 'admin_menu')],
-        [Markup.button.callback('🧾 Cuentas Abiertas', 'admin_cuentas')],
-        [Markup.button.callback('🖨️ Configuración del Ticket', 'admin_config')]
-    ]);
-    await ctx.editMessageText('⚙️ *Panel de Administración*\nSelecciona una opción:', { parse_mode: 'MarkdownV2', ...adminMenu });
+    await ctx.editMessageText('⚙️ *Panel de Administración*\nSelecciona una opción:', { parse_mode: 'MarkdownV2', reply_markup: getAdminKeyboard() });
 });
 
 bot.action('admin_clientes', async (ctx) => {
@@ -330,17 +357,20 @@ bot.action('admin_clientes', async (ctx) => {
             return;
         }
 
-        const buttons = clients.map(c => [Markup.button.callback(`👤 ${c.firstName} (${c.phone || 'Sin tel'})`, `view_client_${c.id}`)]);
+        const buttons = clients.map(c => [Markup.button.callback(`👤 ${c.firstName} (${c.phone || 'Sin tel'})`, `admin_view_client_${c.id}`)]);
         buttons.push([Markup.button.callback('⬅️ Volver', 'admin_panel_back')]);
 
-        await ctx.editMessageText('👥 *Gestión de Clientes*\nSelecciona un cliente para ver más detalles:', { parse_mode: 'Markdown', ...Markup.inlineKeyboard(buttons) });
+        await ctx.editMessageText('👥 *Gestión de Clientes*\nSelecciona un cliente para ver más detalles:', {
+            parse_mode: 'Markdown',
+            reply_markup: { inline_keyboard: buttons }
+        });
     } catch (err) {
         console.error(err);
         await ctx.answerCbQuery('Error al cargar clientes');
     }
 });
 
-bot.action(/view_client_(.+)/, async (ctx) => {
+bot.action(/admin_view_client_(.+)/, async (ctx) => {
     const clientId = ctx.match[1];
     try {
         const client = await prisma.user.findUnique({
@@ -367,7 +397,7 @@ bot.action(/view_client_(.+)/, async (ctx) => {
             [Markup.button.callback('⬅️ Volver a Lista', 'admin_clientes')]
         ];
 
-        await ctx.editMessageText(msg, { parse_mode: 'MarkdownV2', ...Markup.inlineKeyboard(buttons) });
+        await ctx.editMessageText(msg, { parse_mode: 'MarkdownV2', reply_markup: Markup.inlineKeyboard(buttons).reply_markup });
     } catch (err) {
         console.error(err);
         await ctx.answerCbQuery('Error al cargar cliente');
@@ -394,7 +424,7 @@ bot.action(/export_client_csv_(.+)/, async (ctx) => {
         for (const order of client.clientOrders) {
             rows.push({
                 'Fecha': order.closedAt ? order.closedAt.toLocaleDateString() : 'N/A',
-                'Mesa': order.table.number,
+                'Mesa': order.table ? order.table.number : 'App',
                 'Total': order.total.toFixed(2),
                 'Metodo Pago': order.paymentMethod === 'CASH' ? 'Efectivo' : 'Tarjeta',
                 'Productos': order.items.map(i => `${i.quantity}x ${i.name}`).join(' | ')
@@ -434,7 +464,7 @@ bot.action(/delete_client_(.+)/, async (ctx) => {
         const buttons = clients.map(c => [Markup.button.callback(`❌ Eliminar: ${c.firstName} (${c.phone || 'Sin tel'})`, `delete_client_${c.id}`)]);
         buttons.push([Markup.button.callback('⬅️ Volver', 'admin_panel_back')]);
 
-        await ctx.editMessageText('👥 *Gestión de Clientes*\nSelecciona un cliente para eliminar su registro:', { parse_mode: 'Markdown', ...Markup.inlineKeyboard(buttons) });
+        await ctx.editMessageText('👥 *Gestión de Clientes*\nSelecciona un cliente para eliminar su registro:', { parse_mode: 'Markdown', reply_markup: Markup.inlineKeyboard(buttons).reply_markup });
     } catch (err) {
         console.error(err);
         await ctx.answerCbQuery('Error al eliminar cliente.');
@@ -513,17 +543,28 @@ bot.action('admin_cuentas', async (ctx) => {
     try {
         const openOrders = await prisma.order.findMany({
             where: { status: 'OPEN' },
-            include: { table: true, user: true }
+            include: { table: true, user: true, client: true }
         });
 
+        const userRole = await prisma.user.findUnique({ where: { telegramId: ctx.from.id } });
         if (openOrders.length === 0) {
-            await ctx.editMessageText('No hay cuentas abiertas actualmente.', Markup.inlineKeyboard([[Markup.button.callback('⬅️ Volver', 'admin_panel_back')]]));
+            const btns = userRole?.role === 'ADMIN' ? [[Markup.button.callback('⬅️ Volver', 'admin_panel_back')]] : [];
+            await ctx.editMessageText('No hay cuentas abiertas actualmente.', Markup.inlineKeyboard(btns));
             return;
         }
 
-        const buttons = openOrders.map(o => [Markup.button.callback(`Mesa ${o.table.number} - Atendida por ${o.user.firstName}`, `view_order_${o.id}`)]);
-        buttons.push([Markup.button.callback('⬅️ Volver', 'admin_panel_back')]);
-        await ctx.editMessageText('Cuentas Abiertas:', Markup.inlineKeyboard(buttons));
+        const buttons = openOrders.map(o => {
+            const loc = o.table ? `Mesa ${o.table.number}` : 'App';
+            const orderDisplayId = `${o.client ? o.client.firstName.toUpperCase() : (o.user ? o.user.firstName.toUpperCase() : 'APP')}-${o.pickupCode || 'N/A'}`;
+            return [Markup.button.callback(`${loc} - ${orderDisplayId} ($${o.total.toFixed(2)})`, `view_order_${o.id}`)];
+        });
+        if (userRole?.role === 'ADMIN') {
+            buttons.push([Markup.button.callback('⬅️ Volver', 'admin_panel_back')]);
+        }
+        await ctx.editMessageText('🧾 *Cuentas Abiertas:*', {
+            parse_mode: 'MarkdownV2',
+            reply_markup: { inline_keyboard: buttons }
+        });
     } catch (err) {
         console.error(err);
         await ctx.answerCbQuery('Error al cargar cuentas');
@@ -535,12 +576,14 @@ bot.action(/view_order_(.+)/, async (ctx) => {
     try {
         const order = await prisma.order.findUnique({
             where: { id: orderId },
-            include: { items: true, table: true, user: true }
+            include: { items: true, table: true, user: true, client: true }
         });
 
         if (!order) return ctx.answerCbQuery('Cuenta no encontrada');
 
-        let msg = `🧾 *Cuenta Mesa ${escapeMarkdownV2(order.table.number)}*\nAbierta por: ${escapeMarkdownV2(order.user.firstName)}\n\n*Productos:*\n`;
+        const loc = order.table ? `Mesa ${escapeMarkdownV2(order.table.number)}` : 'App';
+        const per = order.user ? escapeMarkdownV2(order.user.firstName) : (order.client ? escapeMarkdownV2(order.client.firstName) : 'App');
+        let msg = `🧾 *Cuenta ${loc}*\nAbierta por: ${per}\n\n*Productos:*\n`;
 
         if (order.items.length === 0) {
             msg += '\\- Ninguno aún\n';
@@ -552,18 +595,55 @@ bot.action(/view_order_(.+)/, async (ctx) => {
         }
         msg += `\n*TOTAL:* \\$${escapeMarkdownV2(order.total.toFixed(2))}`;
 
+        const inlineKeyboard: any[] = [
+            [Markup.button.callback('➕ Agregar Productos', `add_items_${order.id}`)],
+            [Markup.button.callback('✏️ Editar Cuenta (Eliminar)', `edit_order_${order.id}`)]
+        ];
+
+        // Specific button for App pickup orders to notify the client
+        if (!order.tableId && order.clientId) {
+            inlineKeyboard.push([Markup.button.callback('🔔 Notificar Listo a Cliente', `notify_ready_${order.id}`)]);
+        }
+
+        inlineKeyboard.push([Markup.button.callback('❌ Cerrar Cuenta (Cobrar)', `close_order_${order.id}`)]);
+        inlineKeyboard.push([Markup.button.callback('⬅️ Volver a Cuentas', `admin_cuentas`)]);
+
         await ctx.editMessageText(msg, {
             parse_mode: 'MarkdownV2',
-            ...Markup.inlineKeyboard([
-                [Markup.button.callback('➕ Agregar Productos', `add_items_${order.id}`)],
-                [Markup.button.callback('✏️ Editar Cuenta (Eliminar)', `edit_order_${order.id}`)],
-                [Markup.button.callback('❌ Cerrar Cuenta (Cobrar)', `close_order_${order.id}`)],
-                [Markup.button.callback('⬅️ Volver a Admin', `admin_cuentas`)]
-            ])
+            reply_markup: { inline_keyboard: inlineKeyboard }
         });
     } catch (err) {
         console.error(err);
         await ctx.answerCbQuery('Error al cargar la cuenta');
+    }
+});
+
+bot.action(/notify_ready_(.+)/, async (ctx) => {
+    const orderId = ctx.match[1];
+    try {
+        const order = await prisma.order.findUnique({
+            where: { id: orderId },
+            include: { client: true }
+        });
+
+        if (!order || !order.client || !order.client.telegramId) {
+            return ctx.answerCbQuery('No se encontró al cliente para notificarle.');
+        }
+
+        const msgBody = order.pickupCode
+            ? `🔔 *¡Tu pedido está listo\\!*\nPor favor, pasa a recogerlo y proporciona este PIN de seguridad al cajero:\n\n*PIN:* \`${order.pickupCode}\``
+            : `🔔 *¡Tu pedido está listo\\!*\nPor favor, pasa a recogerlo\\.`;
+
+        await ctx.telegram.sendMessage(
+            Number(order.client.telegramId),
+            msgBody,
+            { parse_mode: 'MarkdownV2' }
+        );
+
+        await ctx.answerCbQuery('Notificación enviada exitosamente.');
+    } catch (err) {
+        console.error(err);
+        await ctx.answerCbQuery('Error al enviar notificación');
     }
 });
 
@@ -624,6 +704,75 @@ bot.action(/delete_product_(.+)/, async (ctx) => {
     }
 });
 
+
+// FinanceSection
+bot.action('admin_finanzas', async (ctx) => {
+    try {
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
+
+        const closedOrders = await prisma.order.findMany({
+            where: { status: 'CLOSED', closedAt: { gte: today } }
+        });
+
+        const expenses = await prisma.expense.findMany({
+            where: { createdAt: { gte: today } }
+        });
+
+        const totalIncome = closedOrders.reduce((acc: number, curr) => acc + curr.total, 0);
+        const totalExpenses = expenses.reduce((acc: number, curr) => acc + curr.amount, 0);
+        const netBalance = totalIncome - totalExpenses;
+
+        const msg = `📊 *Resumen Financiero (Hoy)*\n\n` +
+            `💰 *Ventas Totales:* $${escapeMarkdownV2(totalIncome.toFixed(2))}\n` +
+            `💸 *Gastos Totales:* $${escapeMarkdownV2(totalExpenses.toFixed(2))}\n` +
+            `📈 *Balance Neto:* $${escapeMarkdownV2(netBalance.toFixed(2))}\n\n` +
+            `_Selecciona una opción:_`;
+
+        const keyboard = Markup.inlineKeyboard([
+            [Markup.button.callback('➕ Registrar Gasto', 'admin_add_expense')],
+            [Markup.button.callback('📋 Ver Gastos de Hoy', 'admin_view_expenses')],
+            [Markup.button.callback('⬅️ Volver', 'admin_panel_back')]
+        ]);
+
+        await ctx.editMessageText(msg, { parse_mode: 'MarkdownV2', ...keyboard });
+    } catch (err) {
+        console.error(err);
+        await ctx.answerCbQuery('Error al cargar finanzas');
+    }
+});
+
+bot.action('admin_add_expense', async (ctx) => {
+    expenseState.set(ctx.from.id, { step: 'DESCRIPTION' });
+    await ctx.editMessageText('📝 *Registro de Gasto*\nPor favor, escribe una descripción para el gasto (ej. Compra de aguacate):', { parse_mode: 'MarkdownV2' });
+});
+
+bot.action('admin_view_expenses', async (ctx) => {
+    try {
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
+        const expenses = await prisma.expense.findMany({
+            where: { createdAt: { gte: today } },
+            orderBy: { createdAt: 'desc' }
+        });
+
+        if (expenses.length === 0) {
+            return ctx.answerCbQuery('No hay gastos registrados hoy.', { show_alert: true });
+        }
+
+        let msg = `📋 *Gastos de Hoy:*\n\n`;
+        for (const exp of expenses) {
+            msg += `\\- ${escapeMarkdownV2(exp.description)}: \\$${escapeMarkdownV2(exp.amount.toFixed(2))}\n`;
+        }
+
+        const keyboard = Markup.inlineKeyboard([[Markup.button.callback('⬅️ Volver', 'admin_finanzas')]]);
+        await ctx.editMessageText(msg, { parse_mode: 'MarkdownV2', ...keyboard });
+    } catch (err) {
+        console.error(err);
+        await ctx.answerCbQuery('Error al cargar gastos');
+    }
+});
+
 // Admin Configuration
 bot.action('admin_config', async (ctx) => {
     try {
@@ -678,12 +827,13 @@ async function handleSalesReport(ctx: any) {
         const closedOrders = await prisma.order.findMany({
             where: {
                 status: 'CLOSED',
-                updatedAt: { gte: today }
+                closedAt: { gte: today }
             },
             include: {
                 user: true,
                 closedBy: true,
-                table: true
+                table: true,
+                client: true
             },
             orderBy: {
                 closedAt: 'asc'
@@ -700,12 +850,13 @@ async function handleSalesReport(ctx: any) {
             reportMessage += `*Desglose de Tickets:*\n`;
             for (const order of closedOrders) {
                 const timeStr = order.closedAt ? order.closedAt.toTimeString().split(' ')[0] : 'N/A';
-                const openName = escapeMarkdownV2(order.user.firstName);
+                const openBy = order.client ? `Cliente: ${escapeMarkdownV2(order.client.firstName)}` : (order.user ? `Mesero: ${escapeMarkdownV2(order.user.firstName)}` : 'App');
                 const closeName = order.closedBy ? escapeMarkdownV2(order.closedBy.firstName) : 'N/A';
                 const methodStr = order.paymentMethod === 'CASH' ? 'Efectivo' : 'Tarjeta';
+                const locStr = order.table ? `Mesa ${escapeMarkdownV2(order.table.number)}` : 'App';
 
-                reportMessage += `\\- Mesa ${escapeMarkdownV2(order.table.number)} \\| \\$${escapeMarkdownV2(order.total.toFixed(2))} \\(${methodStr}\\)\n`;
-                reportMessage += `  🕒 ${escapeMarkdownV2(timeStr)} \\| Abrió: ${openName} \\| Cobró: ${closeName}\n\n`;
+                reportMessage += `\\- ${locStr} \\| \\$${escapeMarkdownV2(order.total.toFixed(2))} \\(${methodStr}\\)\n`;
+                reportMessage += `  🕒 ${escapeMarkdownV2(timeStr)} \\| Abrió: ${openBy} \\| Cobró: ${closeName}\n\n`;
             }
         }
 
@@ -729,26 +880,23 @@ async function handleSalesReport(ctx: any) {
 bot.command('sales_report', requireRole(['ADMIN', 'CONTADOR']), handleSalesReport);
 bot.hears('📊 Reporte de Ventas', requireRole(['ADMIN', 'CONTADOR']), handleSalesReport);
 
-bot.action('export_sales_csv', async (ctx) => {
+async function generateAndSendSalesCSV(ctx: any, date: Date) {
     try {
-        const telegramId = ctx.from.id;
-        const user = await prisma.user.findUnique({ where: { telegramId } });
-        if (!user || !['ADMIN', 'CONTADOR'].includes(user.role)) {
-            return ctx.answerCbQuery('No tienes permisos para exportar este reporte.', { show_alert: true });
-        }
-
-        const today = new Date();
-        today.setHours(0, 0, 0, 0);
+        const startOfDay = new Date(date);
+        startOfDay.setHours(0, 0, 0, 0);
+        const endOfDay = new Date(date);
+        endOfDay.setHours(23, 59, 59, 999);
 
         const closedOrders = await prisma.order.findMany({
             where: {
                 status: 'CLOSED',
-                updatedAt: { gte: today }
+                closedAt: { gte: startOfDay, lte: endOfDay }
             },
             include: {
                 user: true,
                 closedBy: true,
-                table: true
+                table: true,
+                client: true
             },
             orderBy: {
                 closedAt: 'asc'
@@ -756,29 +904,46 @@ bot.action('export_sales_csv', async (ctx) => {
         });
 
         if (closedOrders.length === 0) {
-            return ctx.answerCbQuery('No hay ventas hoy para exportar.', { show_alert: true });
+            const dateStr = startOfDay.toLocaleDateString();
+            if (ctx.answerCbQuery) await ctx.answerCbQuery(`No hay ventas el ${dateStr} para exportar.`, { show_alert: true });
+            else await ctx.reply(`No hay ventas el ${dateStr} para exportar.`);
+            return;
         }
 
         let csvData = 'ID Orden,Mesa,Total,Metodo Pago,Fecha Cierre,Hora Cierre,Abierta Por,Cobrada Por\n';
         for (const order of closedOrders) {
             const dateStr = order.closedAt ? order.closedAt.toISOString().split('T')[0] : 'N/A';
             const timeStr = order.closedAt ? order.closedAt.toTimeString().split(' ')[0] : 'N/A';
-            const openName = order.user.firstName || 'N/A';
+            const openName = order.client ? `Cliente: ${order.client.firstName}` : (order.user ? `Mesero: ${order.user.firstName}` : 'App');
             const closeName = order.closedBy ? order.closedBy.firstName : 'N/A';
             const methodStr = order.paymentMethod === 'CASH' ? 'Efectivo' : 'Tarjeta';
+            const tableNum = order.table ? order.table.number : 'App';
 
-            csvData += `"${order.id}","${order.table.number}","${order.total.toFixed(2)}","${methodStr}","${dateStr}","${timeStr}","${openName}","${closeName}"\n`;
+            csvData += `"${order.id}","${tableNum}","${order.total.toFixed(2)}","${methodStr}","${dateStr}","${timeStr}","${openName}","${closeName}"\n`;
         }
 
         const buffer = Buffer.from(csvData, 'utf-8');
-        const filename = `Reporte_Ventas_${today.toISOString().split('T')[0]}.csv`;
+        const filename = `Reporte_Ventas_${startOfDay.toISOString().split('T')[0]}.csv`;
 
         await ctx.replyWithDocument({ source: buffer, filename: filename });
-        await ctx.answerCbQuery('CSV Exportado');
+        if (ctx.answerCbQuery) await ctx.answerCbQuery('CSV Exportado');
     } catch (err) {
         console.error(err);
-        await ctx.answerCbQuery('Error al exportar reporte.');
+        if (ctx.answerCbQuery) await ctx.answerCbQuery('Error al exportar reporte.');
+        else await ctx.reply('Error al exportar reporte.');
     }
+}
+
+bot.action('export_sales_csv', async (ctx) => {
+    const telegramId = ctx.from.id;
+    const user = await prisma.user.findUnique({ where: { telegramId } });
+    if (!user || !['ADMIN', 'CONTADOR'].includes(user.role)) {
+        return ctx.answerCbQuery('No tienes permisos para exportar este reporte.', { show_alert: true });
+    }
+
+    exportDateState.add(telegramId);
+    await ctx.reply('📅 *Exportar Ventas*\nPor favor, escribe la fecha del reporte que deseas descargar\\.\n\nFormato: `DD/MM/AAAA` \\(ej\\. 04/03/2026\\) o escribe "hoy":', { parse_mode: 'MarkdownV2' });
+    await ctx.answerCbQuery();
 });
 
 async function handleNewOrderFlow(ctx: any) {
@@ -789,7 +954,10 @@ async function handleNewOrderFlow(ctx: any) {
         }
 
         const buttons = tables.map(t => [Markup.button.callback(`Mesa ${t.number} - ${t.status === 'AVAILABLE' ? 'Libre' : 'Ocupada'}`, `select_table_${t.id}`)]);
-        await ctx.reply('🍽️ *Nueva Orden / Ver Cuenta*\nSelecciona una mesa:', { parse_mode: 'MarkdownV2', ...Markup.inlineKeyboard(buttons) });
+        await ctx.reply('🍽️ *Nueva Orden / Ver Cuenta*\nSelecciona una mesa:', {
+            parse_mode: 'MarkdownV2',
+            reply_markup: { inline_keyboard: buttons }
+        });
     } catch (err) {
         console.error(err);
         await ctx.reply('Error al cargar mesas.');
@@ -799,15 +967,80 @@ async function handleNewOrderFlow(ctx: any) {
 bot.command('new_order', requireRole(['ADMIN', 'MESERO']), handleNewOrderFlow);
 bot.hears('📝 Nueva Orden / Ver Mesa', requireRole(['ADMIN', 'MESERO']), handleNewOrderFlow);
 
+bot.hears('🥡 Para Llevar', requireRole(['ADMIN', 'MESERO']), async (ctx) => {
+    const telegramId = ctx.from.id;
+    try {
+        const user = await prisma.user.findUnique({ where: { telegramId: BigInt(telegramId) } });
+        if (!user) return ctx.reply('Usuario no encontrado.');
+
+        // Generate pickup code
+        const pickupCode = Math.floor(1000 + Math.random() * 9000).toString();
+
+        // Create order
+        const order = await prisma.order.create({
+            data: {
+                userId: user.id,
+                status: 'OPEN',
+                pickupCode
+            }
+        });
+
+        // Store active order ID in session state
+        orderAddState.set(telegramId, { orderId: order.id, tableNumber: undefined });
+
+        const products = await prisma.product.findMany({ orderBy: { name: 'asc' } });
+        if (products.length === 0) {
+            return ctx.reply('⚠️ Orden creada, pero el menú está vacío. Añade productos desde el panel de admin.');
+        }
+
+        const buttons = products.map(p => [Markup.button.callback(`➕ ${p.name} ($${p.price.toFixed(2)})`, `add_prod_${p.id}`)]);
+        buttons.push([Markup.button.callback('⬅️ Volver al menú principal', 'main_menu')]);
+
+        await ctx.reply(`🛍️ *Orden Para Llevar*\nID: \`${order.id.split('-')[0].toUpperCase()}\-${pickupCode}\`\nSelecciona productos:`, {
+            parse_mode: 'MarkdownV2',
+            reply_markup: { inline_keyboard: buttons }
+        });
+
+        notifyDashboard('order_new');
+    } catch (err) {
+        console.error(err);
+        await ctx.reply('Error al crear orden para llevar.');
+    }
+});
+
+bot.hears('🧾 Cuentas Abiertas', requireRole(['ADMIN', 'MESERO']), async (ctx) => {
+    try {
+        const openOrders = await prisma.order.findMany({
+            where: { status: 'OPEN' },
+            include: { table: true, user: true, client: true }
+        });
+
+        if (openOrders.length === 0) {
+            await ctx.reply('No hay cuentas abiertas actualmente.');
+            return;
+        }
+
+        const buttons = openOrders.map(o => {
+            const loc = o.table ? `Mesa ${o.table.number}` : 'App';
+            const orderDisplayId = `${o.client ? o.client.firstName.toUpperCase() : (o.user ? o.user.firstName.toUpperCase() : 'APP')}-${o.pickupCode || 'N/A'}`;
+            return [Markup.button.callback(`${loc} - ${orderDisplayId} ($${o.total.toFixed(2)})`, `view_order_${o.id}`)];
+        });
+
+        await ctx.reply('🧾 *Cuentas Abiertas:*', {
+            parse_mode: 'MarkdownV2',
+            reply_markup: { inline_keyboard: buttons }
+        });
+    } catch (err) {
+        console.error(err);
+        await ctx.reply('Error al cargar cuentas');
+    }
+});
+
 bot.hears('⚙️ Panel de Administración', requireRole(['ADMIN']), async (ctx) => {
-    const adminMenu = Markup.inlineKeyboard([
-        [Markup.button.callback('👥 Gestión de Roles', 'admin_roles')],
-        [Markup.button.callback('🪑 Gestión de Mesas', 'admin_mesas')],
-        [Markup.button.callback('🍔 Gestión de Menú', 'admin_menu')],
-        [Markup.button.callback('🧾 Cuentas Abiertas', 'admin_cuentas')],
-        [Markup.button.callback('🖨️ Configuración del Ticket', 'admin_config')]
-    ]);
-    await ctx.reply('⚙️ *Panel de Administración*\nSelecciona una opción:', { parse_mode: 'MarkdownV2', ...adminMenu });
+    await ctx.reply('⚙️ *Panel de Administración*\nSelecciona una opción:', {
+        parse_mode: 'MarkdownV2',
+        reply_markup: getAdminKeyboard()
+    });
 });
 
 bot.hears('❓ Ayuda', async (ctx) => {
@@ -843,7 +1076,7 @@ bot.action('list_tables', async (ctx) => {
         }
 
         const buttons = tables.map(t => [Markup.button.callback(`Mesa ${t.number} - ${t.status === 'AVAILABLE' ? 'Libre' : 'Ocupada'}`, `select_table_${t.id}`)]);
-        await ctx.editMessageText('🍽️ *Nueva Orden / Ver Cuenta*\nSelecciona una mesa:', { parse_mode: 'MarkdownV2', ...Markup.inlineKeyboard(buttons) });
+        await ctx.editMessageText('🍽️ *Nueva Orden / Ver Cuenta*\nSelecciona una mesa:', { parse_mode: 'MarkdownV2', reply_markup: Markup.inlineKeyboard(buttons).reply_markup });
     } catch (err) {
         console.error(err);
         await ctx.answerCbQuery('Error al cargar mesas.');
@@ -892,7 +1125,8 @@ bot.action(/select_table_(.+)/, async (ctx) => {
         } else {
             // Already has open order
             const order = table.orders[0];
-            let msg = `🧾 *Cuenta Mesa ${escapeMarkdownV2(table.number)}*\nAbierta por: ${escapeMarkdownV2(order.user.firstName)}\n`;
+            const openName = order.user ? escapeMarkdownV2(order.user.firstName) : (order.client ? escapeMarkdownV2(order.client.firstName) : 'Automático');
+            let msg = `🧾 *Cuenta Mesa ${escapeMarkdownV2(table.number)}*\nAbierta por: ${openName}\n`;
             if (order.client) {
                 msg += `Cliente: ${escapeMarkdownV2(order.client.firstName)}\n`;
             }
@@ -932,9 +1166,10 @@ bot.action(/edit_order_(.+)/, async (ctx) => {
             where: { id: orderId },
             include: { items: true, table: true }
         });
-        if (!order || order.status !== 'OPEN') return ctx.answerCbQuery('La cuenta no está abierta o no existe');
+        if (!order || !['OPEN', 'CART'].includes(order.status)) return ctx.answerCbQuery('La cuenta no está abierta o no existe');
 
-        let msg = `✏️ *Editando Cuenta Mesa ${escapeMarkdownV2(order.table.number)}*\nSelecciona un producto para eliminarlo:\n\n`;
+        const loc = order.table ? `Mesa ${escapeMarkdownV2(order.table.number)}` : 'App';
+        let msg = `✏️ *Editando Cuenta ${loc}*\nSelecciona un producto para eliminarlo:\n\n`;
         const buttons: any[] = [];
 
         if (order.items.length === 0) {
@@ -946,11 +1181,12 @@ bot.action(/edit_order_(.+)/, async (ctx) => {
             }
         }
 
-        buttons.push([Markup.button.callback('⬅️ Volver a la cuenta', `select_table_${order.table.id}`)]);
+        const backCb = order.table ? `select_table_${order.table.id}` : `view_client_order_${order.id}`;
+        buttons.push([Markup.button.callback('⬅️ Volver a la cuenta', backCb)]);
 
         await ctx.editMessageText(msg, {
             parse_mode: 'MarkdownV2',
-            ...Markup.inlineKeyboard(buttons)
+            reply_markup: { inline_keyboard: buttons }
         });
     } catch (err) {
         console.error(err);
@@ -965,20 +1201,31 @@ bot.action(/rm_itm_(.+)/, async (ctx) => {
         const item = await prisma.orderItem.findUnique({ where: { id: itemId }, include: { order: { include: { table: true } } } });
         if (!item) return ctx.answerCbQuery('El producto ya fue eliminado', { show_alert: true });
 
-        // Delete item
-        await prisma.orderItem.delete({ where: { id: itemId } });
+        const orderId = item.orderId;
+
+        if (item.quantity > 1) {
+            // Decrement quantity
+            await prisma.orderItem.update({
+                where: { id: itemId },
+                data: { quantity: { decrement: 1 } }
+            });
+        } else {
+            // Delete item
+            await prisma.orderItem.delete({ where: { id: itemId } });
+        }
 
         // Update order total
         const updatedOrder = await prisma.order.update({
-            where: { id: item.orderId },
+            where: { id: orderId },
             data: { total: { decrement: item.price } },
-            include: { items: { orderBy: { createdAt: 'asc' } }, table: true }
+            include: { items: { orderBy: { name: 'asc' } }, table: true }
         });
 
         await ctx.answerCbQuery(`🗑️ ${item.name} eliminado.`);
 
         // Rerender edit order menu
-        let msg = `✏️ *Editando Cuenta Mesa ${escapeMarkdownV2(updatedOrder.table.number)}*\n✅ Eliminado: ${escapeMarkdownV2(item.name)}\nSelecciona otro producto para eliminarlo:\n\n`;
+        const loc = updatedOrder.table ? `Mesa ${escapeMarkdownV2(updatedOrder.table.number)}` : 'App';
+        let msg = `✏️ *Editando Cuenta ${loc}*\n✅ Eliminado: ${escapeMarkdownV2(item.name)}\nSelecciona otro producto para eliminarlo:\n\n`;
         const buttons: any[] = [];
 
         if (updatedOrder.items.length === 0) {
@@ -990,11 +1237,12 @@ bot.action(/rm_itm_(.+)/, async (ctx) => {
             }
         }
 
-        buttons.push([Markup.button.callback('⬅️ Volver a la cuenta', `select_table_${updatedOrder.table.id}`)]);
+        const backCb = updatedOrder.table ? `select_table_${updatedOrder.table.id}` : `view_client_order_${updatedOrder.id}`;
+        buttons.push([Markup.button.callback('⬅️ Volver a la cuenta', backCb)]);
 
         await ctx.editMessageText(msg, {
             parse_mode: 'MarkdownV2',
-            ...Markup.inlineKeyboard(buttons)
+            reply_markup: { inline_keyboard: buttons }
         });
 
     } catch (err) {
@@ -1007,24 +1255,56 @@ bot.action(/assign_client_(.+)/, async (ctx) => {
     const orderId = ctx.match[1];
     try {
         const order = await prisma.order.findUnique({ where: { id: orderId }, include: { table: true } });
-        if (!order || order.status !== 'OPEN') return ctx.answerCbQuery('La cuenta no está abierta o no existe');
+        if (!order || !['OPEN', 'CART'].includes(order.status)) return ctx.answerCbQuery('La cuenta no está abierta o no existe');
 
-        const clients = await prisma.user.findMany({ where: { role: 'CLIENTE' }, orderBy: { firstName: 'asc' } });
-        if (clients.length === 0) {
-            return ctx.answerCbQuery('No hay clientes registrados en el sistema.', { show_alert: true });
+        const backCb = order.table ? `select_table_${order.table.id}` : `view_client_order_${order.id}`;
+        const loc = order.table ? `Mesa ${order.table.number}` : 'App';
+
+        const buttons = [
+            [Markup.button.callback('🔍 Buscar Cliente (Nombre/Tel)', `search_client_${order.id}`)],
+            [Markup.button.callback('📋 Listar Todos los Clientes', `list_all_clients_${order.id}`)]
+        ];
+
+        if (order.clientId) {
+            buttons.push([Markup.button.callback('❌ Quitar Cliente Actual', `set_client_${order.id}_none`)]);
         }
 
-        const buttons = clients.map(c => [Markup.button.callback(`👤 ${c.firstName} (${c.phone || 'Sin tel'})`, `set_client_${order.id}_${c.id}`)]);
-        buttons.push([Markup.button.callback('❌ Quitar Cliente', `set_client_${order.id}_none`)]);
-        buttons.push([Markup.button.callback('⬅️ Volver a la cuenta', `select_table_${order.table.id}`)]);
+        buttons.push([Markup.button.callback('⬅️ Volver a la cuenta', backCb)]);
 
-        await ctx.editMessageText(`👤 *Asignar Cliente a Mesa ${escapeMarkdownV2(order.table.number)}*\nSelecciona un cliente:`, {
+        await ctx.editMessageText(`👤 *Asignar Cliente a ${escapeMarkdownV2(loc)}*\n\n¿Cómo deseas encontrar al cliente?`, {
             parse_mode: 'MarkdownV2',
-            ...Markup.inlineKeyboard(buttons)
+            reply_markup: { inline_keyboard: buttons }
         });
     } catch (err) {
         console.error(err);
-        await ctx.answerCbQuery('Error al cargar lista de clientes');
+        await ctx.answerCbQuery('Error al cargar opciones de cliente');
+    }
+});
+
+bot.action(/search_client_(.+)/, async (ctx) => {
+    const orderId = ctx.match[1];
+    waiterClientSearchState.set(ctx.from.id, { orderId });
+    await ctx.editMessageText('🔎 *Buscar Cliente*\nEscribe el nombre o teléfono del cliente para buscarlo:', {
+        parse_mode: 'MarkdownV2',
+        reply_markup: { inline_keyboard: [[{ text: '❌ Cancelar', callback_data: `assign_client_${orderId}` }]] }
+    });
+});
+
+bot.action(/list_all_clients_(.+)/, async (ctx) => {
+    const orderId = ctx.match[1];
+    try {
+        const clients = await prisma.user.findMany({ where: { role: 'CLIENTE' }, orderBy: { firstName: 'asc' }, take: 50 });
+        if (clients.length === 0) {
+            return ctx.answerCbQuery('No hay clientes registrados.', { show_alert: true });
+        }
+
+        const buttons = clients.map(c => [Markup.button.callback(`👤 ${c.firstName} (${c.phone || 'N/T'})`, `set_client_${orderId}_${c.id}`)]);
+        buttons.push([Markup.button.callback('⬅️ Volver', `assign_client_${orderId}`)]);
+
+        await ctx.editMessageText('👥 *Todos los Clientes:*', Markup.inlineKeyboard(buttons));
+    } catch (err) {
+        console.error(err);
+        await ctx.answerCbQuery('Error al listar clientes');
     }
 });
 
@@ -1046,14 +1326,20 @@ bot.action(/set_client_(.+)_(.+)/, async (ctx) => {
 
         // Return to the table view by re-invoking the internal table load logic
         // We'll simulate the load table action 
-        const tableId = order.table.id;
-
-        // This is a minimal refetch just to return the view back
-        await ctx.editMessageText('✅ Actualizado. Vuelve a abrir la mesa.', {
-            ...Markup.inlineKeyboard([
-                [Markup.button.callback(`Volver a la Mesa ${order.table.number}`, `select_table_${tableId}`)]
-            ])
-        });
+        if (order.tableId) {
+            const tableId = order.tableId;
+            await ctx.editMessageText('✅ Actualizado. Vuelve a abrir la mesa.', {
+                ...Markup.inlineKeyboard([
+                    [Markup.button.callback(`Volver a la Mesa ${order.table?.number || ''}`, `select_table_${tableId}`)]
+                ])
+            });
+        } else {
+            await ctx.editMessageText('✅ Cliente asignado.', {
+                ...Markup.inlineKeyboard([
+                    [Markup.button.callback(`Volver a la Orden`, `view_client_order_${order.id}`)]
+                ])
+            });
+        }
 
     } catch (err) {
         console.error(err);
@@ -1066,20 +1352,23 @@ bot.action(/add_items_(.+)/, async (ctx) => {
     const telegramId = ctx.from.id;
     try {
         const order = await prisma.order.findUnique({ where: { id: orderId }, include: { table: true } });
-        if (!order || order.status !== 'OPEN') return ctx.answerCbQuery('La cuenta no está abierta o no existe');
+        if (!order || !['OPEN', 'CART'].includes(order.status)) return ctx.answerCbQuery('La cuenta no está abierta o no existe');
 
         // Store active order ID in session state to avoid 64-byte callback limit on Telegram
-        orderAddState.set(telegramId, { orderId, tableNumber: order.table.number });
+        orderAddState.set(telegramId, { orderId, tableNumber: order.table?.number });
 
         const products = await prisma.product.findMany({ orderBy: { name: 'asc' } });
         if (products.length === 0) {
             return ctx.answerCbQuery('El menú está vacío. Añade productos desde el panel de admin.', { show_alert: true });
         }
 
-        const buttons = products.map(p => [Markup.button.callback(`➕ ${p.name} ($${p.price.toFixed(2)})`, `add_prod_${p.id}`)]);
-        buttons.push([Markup.button.callback('⬅️ Volver a la cuenta', `select_table_${order.table.id}`)]);
+        const backCb = order.table ? `select_table_${order.table.id}` : `view_client_order_${order.id}`;
+        const loc = order.table ? `Mesa ${escapeMarkdownV2(order.table.number)}` : 'la orden de la App';
 
-        await ctx.editMessageText(`📖 *Menú*\nSelecciona productos para la Mesa ${escapeMarkdownV2(order.table.number)}:`, { parse_mode: 'MarkdownV2', ...Markup.inlineKeyboard(buttons) });
+        const buttons = products.map(p => [Markup.button.callback(`➕ ${p.name} ($${p.price.toFixed(2)})`, `add_prod_${p.id}`)]);
+        buttons.push([Markup.button.callback('⬅️ Volver a la cuenta', backCb)]);
+
+        await ctx.editMessageText(`📖 *Menú*\nSelecciona productos para ${loc}:`, { parse_mode: 'MarkdownV2', reply_markup: Markup.inlineKeyboard(buttons).reply_markup });
     } catch (err) {
         console.error(err);
         await ctx.answerCbQuery('Error al cargar el menú para la orden');
@@ -1102,33 +1391,58 @@ bot.action(/add_prod_(.+)/, async (ctx) => {
 
         if (!product || !order) return ctx.answerCbQuery('Error, producto u orden no encontrados');
 
-        await prisma.orderItem.create({
-            data: {
-                orderId: order.id,
-                name: product.name,
-                price: product.price,
-                quantity: 1
-            }
+        if (order.table && (order.table.status as string) === 'BLOCKED') {
+            return ctx.answerCbQuery('⚠️ Mesa Bloqueada: No se pueden agregar productos.', { show_alert: true });
+        }
+
+        const user = await prisma.user.findUnique({ where: { telegramId: BigInt(telegramId) } });
+        if (!user) return ctx.answerCbQuery('Usuario no encontrado');
+
+        // Check if item already exists in this order
+        const existingItem = await prisma.orderItem.findFirst({
+            where: { orderId: order.id, name: product.name }
         });
+
+        if (existingItem) {
+            await prisma.orderItem.update({
+                where: { id: existingItem.id },
+                data: { quantity: { increment: 1 } }
+            });
+        } else {
+            await prisma.orderItem.create({
+                data: {
+                    orderId: order.id,
+                    userId: user.id,
+                    name: product.name,
+                    price: product.price,
+                    quantity: 1
+                } as any
+            });
+        }
 
         await prisma.order.update({
             where: { id: order.id },
             data: { total: { increment: product.price } }
         });
 
+        notifyDashboard('table_updated');
+
         await ctx.answerCbQuery(`✅ Añadido: ${product.name}`);
 
         // Rerender the menu to show the updated status
         const products = await prisma.product.findMany({ orderBy: { name: 'asc' } });
+        const backCb = order.table ? `select_table_${order.table.id}` : `view_client_order_${order.id}`;
+
         const buttons = products.map(p => [Markup.button.callback(`➕ ${p.name} ($${p.price.toFixed(2)})`, `add_prod_${p.id}`)]);
-        buttons.push([Markup.button.callback('⬅️ Volver a la cuenta', `select_table_${order.table.id}`)]);
+        buttons.push([Markup.button.callback('⬅️ Volver a la cuenta', backCb)]);
 
         // Replace special characters for MarkdownV2, except the ones we use for formatting
         const safeProductName = escapeMarkdownV2(product.name);
+        const safeLocName = order.table ? `la Mesa ${escapeMarkdownV2(order.table.number)}` : 'App';
 
-        await ctx.editMessageText(`📖 *Menú*\n✅ Añadido: ${safeProductName}\nSigue seleccionando productos para la Mesa ${escapeMarkdownV2(order.table.number)}:`, {
+        await ctx.editMessageText(`📖 *Menú*\n✅ Añadido: ${safeProductName}\nSigue seleccionando productos para ${safeLocName}:`, {
             parse_mode: 'MarkdownV2',
-            ...Markup.inlineKeyboard(buttons)
+            reply_markup: { inline_keyboard: buttons }
         });
 
     } catch (err) {
@@ -1143,12 +1457,15 @@ bot.action(/close_order_(.+)/, async (ctx) => {
         const order = await prisma.order.findUnique({ where: { id: orderId }, include: { table: true } });
         if (!order) return ctx.answerCbQuery('No se encontró la orden');
 
-        await ctx.editMessageText(`💰 *Cobrar Mesa ${escapeMarkdownV2(order.table.number)}*\n*Total:* \\$${escapeMarkdownV2(order.total.toFixed(2))}\n\n¿Método de pago?`, {
+        const loc = order.table ? `Mesa ${escapeMarkdownV2(order.table.number)}` : 'Pedido App';
+        const backCb = order.table ? `select_table_${order.table.id}` : `view_client_order_${order.id}`;
+
+        await ctx.editMessageText(`💰 *Cobrar ${loc}*\n*Total:* \\$${escapeMarkdownV2(order.total.toFixed(2))}\n\n¿Método de pago?`, {
             parse_mode: 'MarkdownV2',
             ...Markup.inlineKeyboard([
                 [Markup.button.callback('💵 Efectivo', `pay_cash_${order.id}`)],
                 [Markup.button.callback('💳 Tarjeta', `pay_card_${order.id}`)],
-                [Markup.button.callback('⬅️ Volver a la cuenta', `select_table_${order.table.id}`)]
+                [Markup.button.callback('⬅️ Volver a la cuenta', backCb)]
             ])
         });
     } catch (err) {
@@ -1157,79 +1474,117 @@ bot.action(/close_order_(.+)/, async (ctx) => {
     }
 });
 
+async function processPaymentAndCloseOrder(ctx: any, orderId: string, telegramId: number, method: 'CASH' | 'CARD') {
+    const order = await prisma.order.findUnique({ where: { id: orderId }, include: { table: true, items: true, client: true } });
+    const user = await prisma.user.findUnique({ where: { telegramId } });
+    if (!order || !user) {
+        if (ctx.answerCbQuery) await ctx.answerCbQuery('Error al identificar usuario u orden');
+        else await ctx.reply('Error al identificar usuario u orden');
+        return;
+    }
+
+    const config = await prisma.restaurantConfig.upsert({ where: { id: 1 }, update: {}, create: {} });
+
+    await prisma.order.update({
+        where: { id: orderId },
+        data: { status: 'CLOSED', paymentMethod: method, closedById: user.id, closedAt: new Date() }
+    });
+    if (order.tableId) {
+        await prisma.table.update({ where: { id: order.tableId }, data: { status: 'AVAILABLE' } });
+        notifyDashboard('table_updated', { tableId: order.tableId, status: 'AVAILABLE' });
+    }
+
+    // Notify Dashboard of order closure
+    notifyDashboard('order_updated', { orderId: order.id, status: 'CLOSED' });
+
+    order.paymentMethod = method as any;
+
+    const loc = order.table ? `Mesa ${escapeMarkdownV2(order.table.number)}` : 'App';
+    const cbBack = order.table ? 'list_tables' : 'admin_cuentas';
+    const cbText = order.table ? '⬅️ Volver a Todas las Mesas' : '⬅️ Volver a Cuentas Abiertas';
+
+    const methodTxt = method === 'CASH' ? '💵 Efectivo' : '💳 Tarjeta';
+
+    const msg = `✅ *Cuenta de ${loc} CERRADA*\n*Cobrado:* \\$${escapeMarkdownV2(order.total.toFixed(2))} \\(${methodTxt}\\)`;
+
+    // Si viene de un boton (callback_query), se puede editar el mensaje. Si viene de un texto (message), se debe responder.
+    if (ctx.updateType === 'callback_query' && ctx.editMessageText) {
+        await ctx.editMessageText(msg, {
+            parse_mode: 'MarkdownV2',
+            reply_markup: { inline_keyboard: [[{ text: cbText, callback_data: cbBack }]] }
+        });
+    } else {
+        await ctx.reply(msg, {
+            parse_mode: 'MarkdownV2',
+            reply_markup: { inline_keyboard: [[{ text: cbText, callback_data: cbBack }]] }
+        });
+    }
+
+    try {
+        console.log(`Generating ticket image for order ${order.id}...`);
+        const imageBuffer = await generateTicketImage(order, config);
+        console.log(`Image generated successfully, size: ${imageBuffer.length} bytes. Sending to waiter...`);
+
+        const tblName = order.table ? `Mesa ${order.table.number}` : 'App';
+        await ctx.replyWithPhoto({ source: imageBuffer }, { caption: `Ticket ${tblName}` });
+
+        console.log(`Ticket sent to waiter. Checking if client notification is needed... Client: ${order.client ? 'Yes' : 'No'}, TelegramId: ${order.client?.telegramId}`);
+
+        if (order.client && order.client.telegramId) {
+            try {
+                console.log(`Sending ticket to client ${order.client.telegramId}...`);
+                await ctx.telegram.sendPhoto(
+                    Number(order.client.telegramId),
+                    { source: imageBuffer },
+                    {
+                        caption: `✨ *¡Tu pedido ha sido entregado\\!*\n\nMuchas gracias por tu compra\\. ¡Esperamos volver a verte pronto\\!\n\\- _El equipo de Tacos_`,
+                        parse_mode: 'MarkdownV2'
+                    }
+                );
+                console.log(`Ticket successfully sent to client.`);
+            } catch (e) {
+                console.error(`Could not notify client ${order.client.telegramId} on order close:`, e);
+            }
+        }
+    } catch (ticketError) {
+        console.error('Error generating or sending ticket:', ticketError);
+        await ctx.reply(`⚠️ El pedido se cerró correctamente, pero hubo un error al generar el ticket visual: ${ticketError}`);
+    }
+}
+
 bot.action(/pay_cash_(.+)/, async (ctx) => {
     const orderId = ctx.match[1];
-    const telegramId = ctx.from.id;
     try {
-        const order = await prisma.order.findUnique({ where: { id: orderId }, include: { table: true, items: true } });
-        const user = await prisma.user.findUnique({ where: { telegramId } });
-        if (!order || !user) return ctx.answerCbQuery('Error al identificar usuario u orden');
-
-        const config = await prisma.restaurantConfig.upsert({ where: { id: 1 }, update: {}, create: {} });
-
-        await prisma.order.update({
-            where: { id: orderId },
-            data: {
-                status: 'CLOSED',
-                paymentMethod: 'CASH',
-                closedById: user.id,
-                closedAt: new Date()
-            }
-        });
-        await prisma.table.update({ where: { id: order.tableId }, data: { status: 'AVAILABLE' } });
-
-        order.paymentMethod = 'CASH' as any;
-
-        await ctx.editMessageText(`✅ *Cuenta de Mesa ${escapeMarkdownV2(order.table.number)} CERRADA*\n*Cobrado:* \\$${escapeMarkdownV2(order.total.toFixed(2))} \\(💵 Efectivo\\)`, {
-            parse_mode: 'MarkdownV2',
-            ...Markup.inlineKeyboard([
-                [Markup.button.callback('⬅️ Volver a Todas las Mesas', 'list_tables')]
-            ])
-        });
-
-        const imageBuffer = await generateTicketImage(order, config);
-        await ctx.replyWithPhoto({ source: imageBuffer }, { caption: `Ticket Mesa ${order.table.number}` });
+        const order = await prisma.order.findUnique({ where: { id: orderId } });
+        if (order?.pickupCode && order?.status === 'OPEN') {
+            waiterPickupCodeState.set(ctx.from.id, { orderId, paymentMethod: 'CASH' });
+            return ctx.editMessageText('🔒 *Validación de Entrega*\n\nPor favor, pídele al cliente e ingresa aquí su *código PIN de 4 dígitos* para poder cobrar y entregar su pedido:', {
+                parse_mode: 'Markdown',
+                reply_markup: { inline_keyboard: [[{ text: '❌ Cancelar', callback_data: `view_order_${orderId}` }]] }
+            });
+        }
+        await processPaymentAndCloseOrder(ctx, orderId, ctx.from.id, 'CASH');
     } catch (err) {
         console.error(err);
-        await ctx.answerCbQuery('Error al cerrar la cuenta en efectivo');
+        await ctx.answerCbQuery('Error al procesar cobro en efectivo');
     }
 });
 
 bot.action(/pay_card_(.+)/, async (ctx) => {
     const orderId = ctx.match[1];
-    const telegramId = ctx.from.id;
     try {
-        const order = await prisma.order.findUnique({ where: { id: orderId }, include: { table: true, items: true } });
-        const user = await prisma.user.findUnique({ where: { telegramId } });
-        if (!order || !user) return ctx.answerCbQuery('Error al identificar usuario u orden');
-
-        const config = await prisma.restaurantConfig.upsert({ where: { id: 1 }, update: {}, create: {} });
-
-        await prisma.order.update({
-            where: { id: orderId },
-            data: {
-                status: 'CLOSED',
-                paymentMethod: 'CARD',
-                closedById: user.id,
-                closedAt: new Date()
-            }
-        });
-        await prisma.table.update({ where: { id: order.tableId }, data: { status: 'AVAILABLE' } });
-
-        order.paymentMethod = 'CARD' as any;
-
-        await ctx.editMessageText(`✅ *Cuenta de Mesa ${escapeMarkdownV2(order.table.number)} CERRADA*\n*Cobrado:* \\$${escapeMarkdownV2(order.total.toFixed(2))} \\(💳 Tarjeta\\)`, {
-            parse_mode: 'MarkdownV2',
-            ...Markup.inlineKeyboard([
-                [Markup.button.callback('⬅️ Volver a Todas las Mesas', 'list_tables')]
-            ])
-        });
-
-        const imageBuffer = await generateTicketImage(order, config);
-        await ctx.replyWithPhoto({ source: imageBuffer }, { caption: `Ticket Mesa ${order.table.number}` });
+        const order = await prisma.order.findUnique({ where: { id: orderId } });
+        if (order?.pickupCode && order?.status === 'OPEN') {
+            waiterPickupCodeState.set(ctx.from.id, { orderId, paymentMethod: 'CARD' });
+            return ctx.editMessageText('🔒 *Validación de Entrega*\n\nPor favor, pídele al cliente e ingresa aquí su *código PIN de 4 dígitos* para poder cobrar y entregar su pedido:', {
+                parse_mode: 'Markdown',
+                reply_markup: { inline_keyboard: [[{ text: '❌ Cancelar', callback_data: `view_order_${orderId}` }]] }
+            });
+        }
+        await processPaymentAndCloseOrder(ctx, orderId, ctx.from.id, 'CARD');
     } catch (err) {
         console.error(err);
-        await ctx.answerCbQuery('Error al cerrar la cuenta con tarjeta');
+        await ctx.answerCbQuery('Error al procesar cobro con tarjeta');
     }
 });
 
@@ -1238,6 +1593,144 @@ bot.on('message', async (ctx, next) => {
 
     if (ctx.message && 'text' in ctx.message) {
         const text = ctx.message.text.trim();
+
+        // Auto-register prompt for WhatsApp/unknown users
+        const user = await prisma.user.findUnique({ where: { telegramId } });
+        if (!user) {
+            const totalUsers = await prisma.user.count();
+            const isFirst = totalUsers === 0;
+            const firstName = ctx.from.first_name || 'Usuario';
+            const username = ctx.from.username ?? null;
+
+            if (isFirst) {
+                await prisma.user.create({
+                    data: { telegramId, username, firstName, role: 'ADMIN' }
+                });
+                await ctx.reply(`¡Hola ${firstName}! Has sido registrado como ADMIN del sistema. Usa los botones de abajo o /help.`, getMainKeyboard('ADMIN'));
+            } else {
+                await ctx.reply(`¡Bienvenido ${firstName}! ¿Cómo deseas registrarte?`,
+                    Markup.keyboard([
+                        ['🌮 Soy Cliente', '💼 Soy Empleado']
+                    ]).oneTime().resize()
+                );
+            }
+            return;
+        }
+
+        if (expenseState.has(telegramId)) {
+            const state = expenseState.get(telegramId)!;
+            if (state.step === 'DESCRIPTION') {
+                expenseState.set(telegramId, { step: 'AMOUNT', description: text });
+                await ctx.reply('💰 *Monto del Gasto*\nAhora, ingresa el monto del gasto (solo números, ej: 150.50):', { parse_mode: 'MarkdownV2' });
+                return;
+            } else if (state.step === 'AMOUNT') {
+                const amount = parseFloat(text.replace(',', '.'));
+                if (isNaN(amount) || amount <= 0) {
+                    return ctx.reply('❌ *Monto no válido.* Por favor ingresa un número positivo.');
+                }
+
+                try {
+                    await prisma.expense.create({
+                        data: {
+                            description: state.description!,
+                            amount: amount
+                        }
+                    });
+                    expenseState.delete(telegramId);
+                    const keyboard = Markup.inlineKeyboard([[Markup.button.callback('📊 Volver a Finanzas', 'admin_finanzas')]]);
+                    await ctx.reply(`✅ *Gasto registrado*\n\n*Descripción:* ${escapeMarkdownV2(state.description!)}\n*Monto:* \\$${escapeMarkdownV2(amount.toFixed(2))}`, { parse_mode: 'MarkdownV2', ...keyboard });
+                } catch (err) {
+                    console.error(err);
+                    await ctx.reply('Error al registrar el gasto.');
+                    expenseState.delete(telegramId);
+                }
+                return;
+            }
+        }
+
+        if (exportDateState.has(telegramId)) {
+            exportDateState.delete(telegramId);
+            let targetDate = new Date();
+            if (text.toLowerCase() !== 'hoy') {
+                const parts = text.split(/[\/\-]/);
+                if (parts.length === 3) {
+                    // Try DD/MM/YYYY
+                    const day = parseInt(parts[0]);
+                    const month = parseInt(parts[1]) - 1;
+                    const year = parts[2].length === 2 ? 2000 + parseInt(parts[2]) : parseInt(parts[2]);
+                    targetDate = new Date(year, month, day);
+                } else {
+                    return ctx.reply('❌ *Formato de fecha incorrecto.* Debe ser DD/MM/AAAA (ej. 04/03/2026). Intenta de nuevo presionando Exportar.', { parse_mode: 'Markdown' });
+                }
+            }
+
+            if (isNaN(targetDate.getTime())) {
+                return ctx.reply('❌ *Fecha no válida.* Por favor intenta de nuevo presionando Exportar.', { parse_mode: 'Markdown' });
+            }
+
+            await ctx.reply(`🔍 *Generando reporte* para el día ${targetDate.toLocaleDateString()}...`, { parse_mode: 'Markdown' });
+            await generateAndSendSalesCSV(ctx, targetDate);
+            return;
+        }
+
+        if (waiterClientSearchState.has(telegramId)) {
+            const state = waiterClientSearchState.get(telegramId)!;
+            // Mode: Keep state if they want to retry? No, usually delete.
+            waiterClientSearchState.delete(telegramId);
+
+            try {
+                const clients = await prisma.user.findMany({
+                    where: {
+                        role: 'CLIENTE',
+                        OR: [
+                            { firstName: { contains: text, mode: 'insensitive' } },
+                            { phone: { contains: text, mode: 'insensitive' } }
+                        ]
+                    },
+                    take: 10
+                });
+
+                if (clients.length === 0) {
+                    await ctx.reply(`❌ No se encontraron clientes que coincidan con "${escapeMarkdownV2(text)}"\\.`, {
+                        parse_mode: 'MarkdownV2',
+                        ...Markup.inlineKeyboard([
+                            [Markup.button.callback('🔍 Reintentar', `search_client_${state.orderId}`)],
+                            [Markup.button.callback('📋 Ver Todos', `list_all_clients_${state.orderId}`)],
+                            [Markup.button.callback('⬅️ Volver', `assign_client_${state.orderId}`)]
+                        ])
+                    });
+                    return;
+                }
+
+                const buttons = clients.map(c => [Markup.button.callback(`👤 ${c.firstName} (${c.phone || 'N/T'})`, `set_client_${state.orderId}_${c.id}`)]);
+                buttons.push([Markup.button.callback('⬅️ Volver', `assign_client_${state.orderId}`)]);
+
+                await ctx.reply(`✅ *Resultados para "${escapeMarkdownV2(text)}":*`, {
+                    parse_mode: 'MarkdownV2',
+                    reply_markup: { inline_keyboard: buttons }
+                });
+            } catch (err) {
+                console.error(err);
+                await ctx.reply('Error al realizar la búsqueda.');
+            }
+            return;
+        }
+
+        if (waiterPickupCodeState.has(telegramId)) {
+            const state = waiterPickupCodeState.get(telegramId)!;
+            const inputCode = text;
+
+            const order = await prisma.order.findUnique({ where: { id: state.orderId } });
+            if (!order || order.pickupCode !== inputCode) {
+                await ctx.reply('❌ *Código incorrecto.* Asegúrate de pedirle al cliente su código de 4 dígitos e intenta de nuevo.', { parse_mode: 'Markdown' });
+                return;
+            }
+
+            waiterPickupCodeState.delete(telegramId);
+            await ctx.reply('✅ *Código verificado exitosamente.* Generando ticket y cerrando cuenta...', { parse_mode: 'Markdown' });
+            await processPaymentAndCloseOrder(ctx, state.orderId, telegramId, state.paymentMethod);
+            return;
+        }
 
         if (clientRegState.has(telegramId)) {
             const state = clientRegState.get(telegramId)!;
@@ -1250,8 +1743,15 @@ bot.on('message', async (ctx, next) => {
             } else if (state.step === 'PHONE') {
                 const fullName = state.name || ctx.from.first_name;
                 try {
-                    await prisma.user.create({
-                        data: {
+                    await prisma.user.upsert({
+                        where: { telegramId },
+                        update: {
+                            username,
+                            firstName: fullName,
+                            phone: text,
+                            role: 'CLIENTE'
+                        },
+                        create: {
                             telegramId,
                             username,
                             firstName: fullName,
@@ -1338,21 +1838,15 @@ bot.on('message', async (ctx, next) => {
     return next();
 });
 
-bot.hears('🚪 Salir', requireRole(['CLIENTE']), async (ctx) => {
-    const telegramId = ctx.from.id;
-    try {
-        const user = await prisma.user.findUnique({ where: { telegramId } });
-        if (user) {
-            await prisma.user.delete({ where: { id: user.id } });
-            await ctx.reply('Has salido de tu cuenta de cliente exitosamente. Si deseas registrarte de nuevo, pulsa /start.', Markup.removeKeyboard());
-        }
-    } catch (err) {
-        console.error(err);
-        await ctx.reply('Error al intentar salir de la cuenta.');
-    }
+bot.hears('🚪 Salir', requireRole(['CLIENTE', 'ADMIN', 'MESERO', 'CONTADOR']), async (ctx) => {
+    await ctx.reply('Has cerrado tu sesión actual en el bot.\n\n¿Cómo deseas registrarte ahora?',
+        Markup.keyboard([
+            ['🌮 Soy Cliente', '💼 Soy Empleado']
+        ]).oneTime().resize()
+    );
 });
 
-bot.hears('📖 Ver Menú', requireRole(['CLIENTE']), async (ctx) => {
+bot.hears('📖 Ver Menú', requireRole(['CLIENTE', 'ADMIN']), async (ctx) => {
     try {
         const products = await prisma.product.findMany({ orderBy: { name: 'asc' } });
         if (products.length === 0) {
@@ -1371,9 +1865,786 @@ bot.hears('📖 Ver Menú', requireRole(['CLIENTE']), async (ctx) => {
     }
 });
 
+bot.hears('📋 Mis Pedidos', requireRole(['CLIENTE', 'ADMIN']), async (ctx) => {
+    const telegramId = ctx.from.id;
+    try {
+        const user = await prisma.user.findUnique({ where: { telegramId } });
+        if (!user) return;
+
+        const activeOrders = await prisma.order.findMany({
+            where: {
+                clientId: user.id,
+                status: { in: ['OPEN', 'PENDING_APPROVAL'] }
+            },
+            include: { items: true },
+            orderBy: { createdAt: 'desc' }
+        });
+
+        if (activeOrders.length === 0) {
+            return ctx.reply('No tienes pedidos activos en este momento.');
+        }
+
+        let msg = `📋 *Mis Pedidos Activos*\n\n`;
+        for (const order of activeOrders) {
+            const statusEmoji = order.status === 'PENDING_APPROVAL' ? '⏳' : '👨‍🍳';
+            const statusTxt = order.status === 'PENDING_APPROVAL' ? 'Pendiente de Aprobación' : 'Siendo Preparado';
+            const orderDisplayId = `${user.firstName.toUpperCase()}-${order.pickupCode || 'N/A'}`;
+
+            msg += `${statusEmoji} *Estado:* ${statusTxt}\n`;
+            msg += `🆔 *ID:* \`${escapeMarkdownV2(orderDisplayId)}\`\n`;
+            if (order.pickupCode) {
+                msg += `🔑 *PIN de Recolección:* \`${order.pickupCode}\`\n`;
+            }
+            msg += `💰 *Total:* \\$${escapeMarkdownV2(order.total.toFixed(2))}\n`;
+            msg += `📦 *Productos:* ${order.items.map(i => `${i.quantity}x ${escapeMarkdownV2(i.name)}`).join(', ')}\n\n`;
+        }
+
+        await ctx.replyWithMarkdownV2(msg);
+    } catch (err) {
+        console.error(err);
+        await ctx.reply('Error al obtener tus pedidos.');
+    }
+});
+
+bot.hears('🛍️ Hacer Pedido', requireRole(['CLIENTE', 'ADMIN']), async (ctx) => {
+    const telegramId = ctx.from.id;
+    try {
+        const user = await prisma.user.findUnique({ where: { telegramId } });
+        if (!user) return;
+
+        // Check if there is already a CART or PENDING_APPROVAL order
+        let order = await prisma.order.findFirst({
+            where: {
+                clientId: user.id,
+                status: { in: ['CART', 'PENDING_APPROVAL'] }
+            },
+            include: { items: true }
+        });
+
+        if (order && order.status === 'PENDING_APPROVAL') {
+            return ctx.reply('Tienes un pedido pendiente de aprobación. Por favor espera a que un mesero lo reciba.');
+        }
+
+        if (!order) {
+            order = await prisma.order.create({
+                data: {
+                    clientId: user.id,
+                    status: 'CART',
+                    total: 0
+                },
+                include: { items: true }
+            });
+        }
+
+        // Display current CART
+        let msg = `🛒 *Tu Pedido \\(Carrito\\)*\n\n`;
+        if (order.items.length === 0) {
+            msg += '\\- _Aún no has agregado productos_\\.\n';
+        } else {
+            for (const item of order.items) {
+                msg += `\\- ${escapeMarkdownV2(item.name)} x${item.quantity} \\(\\$${escapeMarkdownV2(item.price.toFixed(2))}\\)\n`;
+            }
+        }
+        msg += `\n*TOTAL:* \\$${escapeMarkdownV2(order.total.toFixed(2))}\n`;
+        msg += `\nUsa los botones abajo para gestionar tu carrito:`;
+
+        const keyboard = Markup.inlineKeyboard([
+            [Markup.button.callback('➕ Agregar Productos', `add_items_${order.id}`)],
+            order.items.length > 0 ? [Markup.button.callback('✏️ Editar (Eliminar)', `edit_order_${order.id}`)] : [],
+            order.items.length > 0 ? [Markup.button.callback('✅ Enviar Pedido', `submit_client_order_${order.id}`)] : [],
+            [Markup.button.callback('❌ Vaciar Carrito', `empty_cart_${order.id}`)]
+        ].filter(row => row.length > 0));
+
+        await ctx.replyWithMarkdownV2(msg, keyboard);
+
+    } catch (err) {
+        console.error(err);
+        await ctx.reply('Error al abrir tu carrito.');
+    }
+});
+
+bot.action(/view_client_order_(.+)/, async (ctx) => {
+    const orderId = ctx.match[1];
+    try {
+        const order = await prisma.order.findUnique({
+            where: { id: orderId },
+            include: { items: true }
+        });
+
+        if (!order || order.status !== 'CART') {
+            return ctx.answerCbQuery('Carrito expirado o ya enviado.');
+        }
+
+        let msg = `🛒 *Tu Pedido \\(Carrito\\)*\n\n`;
+        if (order.items.length === 0) {
+            msg += '\\- _Aún no has agregado productos_\\.\n';
+        } else {
+            for (const item of order.items) {
+                msg += `\\- ${escapeMarkdownV2(item.name)} x${item.quantity} \\(\\$${escapeMarkdownV2(item.price.toFixed(2))}\\)\n`;
+            }
+        }
+        msg += `\n*TOTAL:* \\$${escapeMarkdownV2(order.total.toFixed(2))}\n`;
+        msg += `\nUsa los botones abajo para gestionar tu carrito\\:`;
+
+        const keyboard = Markup.inlineKeyboard([
+            [Markup.button.callback('➕ Agregar Productos', `add_items_${order.id}`)],
+            order.items.length > 0 ? [Markup.button.callback('✏️ Editar (Eliminar)', `edit_order_${order.id}`)] : [],
+            order.items.length > 0 ? [Markup.button.callback('✅ Enviar Pedido', `submit_client_order_${order.id}`)] : [],
+            [Markup.button.callback('❌ Vaciar Carrito', `empty_cart_${order.id}`)]
+        ].filter(row => row.length > 0));
+
+        await ctx.editMessageText(msg, { parse_mode: 'MarkdownV2', ...keyboard });
+
+    } catch (err) {
+        console.error(err);
+        await ctx.answerCbQuery('Error al actualizar el carrito.');
+    }
+});
+
+bot.action(/submit_client_order_(.+)/, async (ctx) => {
+    const orderId = ctx.match[1];
+    try {
+        const order = await prisma.order.findUnique({
+            where: { id: orderId },
+            include: { items: true, client: true }
+        });
+
+        if (!order || order.status !== 'CART') {
+            return ctx.answerCbQuery('No se puede enviar. El carrito ya fue enviado o no existe.', { show_alert: true });
+        }
+
+        if (order.items.length === 0) {
+            return ctx.answerCbQuery('El carrito está vacío.', { show_alert: true });
+        }
+
+        const pickupCode = Math.floor(1000 + Math.random() * 9000).toString();
+
+        await prisma.order.update({
+            where: { id: orderId },
+            data: { status: 'PENDING_APPROVAL', pickupCode }
+        });
+
+        const clientName = order.client ? escapeMarkdownV2(order.client.firstName) : 'Desconocido';
+        const total = escapeMarkdownV2(order.total.toFixed(2));
+
+        const orderDisplayId = `${order.client ? order.client.firstName.toUpperCase() : 'APP'}-${pickupCode}`;
+
+        let clientMsg = `✅ *Pedido Enviado*\n\n*ID de Orden:* \`${orderDisplayId}\`\n\n*Resumen de tu pedido\\:*\n`;
+        for (const item of order.items) {
+            clientMsg += `\\- ${escapeMarkdownV2(item.name)} x${item.quantity} \\(\\$${escapeMarkdownV2(item.price.toFixed(2))}\\)\n`;
+        }
+        clientMsg += `\n*TOTAL:* \\$${total}\n\n*TU PIN DE RECOLECCIÓN:* \`${pickupCode}\`\n\n_El personal confirmará tu pedido en breve\\ y te pedirán este PIN al entregarte_\\.`;
+
+        await ctx.editMessageText(clientMsg, { parse_mode: 'MarkdownV2' });
+
+        // Notify Admins and Waiters
+        const staff = await prisma.user.findMany({
+            where: { role: { in: ['ADMIN', 'MESERO'] } }
+        });
+
+        const btnKeyboard = Markup.inlineKeyboard([
+            [Markup.button.callback('👀 Ver Pedido Confirmar', `waiter_view_pending_${order.id}`)]
+        ]);
+
+        for (const user of staff) {
+            try {
+                await ctx.telegram.sendMessage(
+                    Number(user.telegramId),
+                    `🛎️ ¡Nuevo pedido recibido\\!\n*ID Orden:* ${escapeMarkdownV2(orderDisplayId)}\n*Cliente:* ${clientName}\n*Total:* \\$${total}`,
+                    { parse_mode: 'MarkdownV2', ...btnKeyboard }
+                );
+            } catch (e) {
+                console.error(`Could not notify staff ${user.telegramId}`);
+            }
+        }
+
+        // Notify Dashboard of new app order
+        notifyDashboard('order_new', { orderId: order.id, status: 'PENDING_APPROVAL' });
+
+    } catch (err) {
+        console.error(err);
+        await ctx.answerCbQuery('Error al enviar el pedido.');
+    }
+});
+
+bot.action(/empty_cart_(.+)/, async (ctx) => {
+    const orderId = ctx.match[1];
+    try {
+        const order = await prisma.order.findUnique({
+            where: { id: orderId }
+        });
+
+        if (!order || order.status !== 'CART') {
+            return ctx.answerCbQuery('El carrito no existe o ya fue enviado.');
+        }
+
+        // Delete all items first, then the order
+        await prisma.orderItem.deleteMany({ where: { orderId } });
+        await prisma.order.delete({ where: { id: orderId } });
+
+        await ctx.editMessageText('🗑️ Tu carrito ha sido vaciado.', Markup.inlineKeyboard([
+            [Markup.button.callback('📖 Ver Menú', 'view_menu_client')]
+        ]));
+
+    } catch (err) {
+        console.error(err);
+        await ctx.answerCbQuery('Error al vaciar el carrito.');
+    }
+});
+
+bot.hears('🛎️ Pedidos de Clientes', requireRole(['ADMIN', 'MESERO']), async (ctx) => {
+    try {
+        const pendingOrders = await prisma.order.findMany({
+            where: { status: 'PENDING_APPROVAL' },
+            include: { client: true },
+            orderBy: { createdAt: 'asc' }
+        });
+
+        if (pendingOrders.length === 0) {
+            return ctx.reply('No hay pedidos pendientes de clientes en este momento.');
+        }
+
+        const buttons = pendingOrders.map(o => {
+            const clientName = o.client ? o.client.firstName : 'Desconocido';
+            return [Markup.button.callback(`🕒 ${clientName} - $${o.total.toFixed(2)}`, `waiter_view_pending_${o.id}`)];
+        });
+
+        await ctx.reply('🛎️ *Pedidos Pendientes de Clientes*\nSelecciona un pedido para revisarlo:', {
+            parse_mode: 'MarkdownV2',
+            reply_markup: { inline_keyboard: buttons }
+        });
+    } catch (err) {
+        console.error(err);
+        await ctx.reply('Error al cargar pedidos pendientes.');
+    }
+});
+
+bot.action(/waiter_view_pending_(.+)/, async (ctx) => {
+    const orderId = ctx.match[1];
+    try {
+        const order = await prisma.order.findUnique({
+            where: { id: orderId },
+            include: { items: true, client: true }
+        });
+
+        if (!order || order.status !== 'PENDING_APPROVAL') {
+            return ctx.answerCbQuery('El pedido ya fue procesado o no existe.', { show_alert: true });
+        }
+
+        const clientName = order.client ? escapeMarkdownV2(order.client.firstName) : 'Desconocido';
+        const clientPhone = order.client?.phone ? escapeMarkdownV2(order.client.phone) : 'Sin Teléfono';
+
+        const orderDisplayId = `${order.client ? order.client.firstName.toUpperCase() : 'APP'}-${order.pickupCode || 'N/A'}`;
+
+        let msg = `🛎️ *Pedido Pendiente*\n*ID Orden:* ${escapeMarkdownV2(orderDisplayId)}\n*Cliente:* ${clientName} \\(${clientPhone}\\)\n*Fecha:* ${escapeMarkdownV2(order.updatedAt.toLocaleString())}\n\n*Productos:*\n`;
+        for (const item of order.items) {
+            msg += `\\- ${escapeMarkdownV2(item.name)} x${item.quantity} \\(\\$${escapeMarkdownV2(item.price.toFixed(2))}\\)\n`;
+        }
+        msg += `\n*TOTAL:* \\$${escapeMarkdownV2(order.total.toFixed(2))}`;
+
+        await ctx.editMessageText(msg, {
+            parse_mode: 'MarkdownV2',
+            ...Markup.inlineKeyboard([
+                [Markup.button.callback('✅ Confirmar Recepción', `waiter_accept_order_${order.id}`)],
+                [Markup.button.callback('⬅️ Volver a Lista', 'btn_view_pending_list')]
+            ])
+        });
+    } catch (err) {
+        console.error(err);
+        await ctx.answerCbQuery('Error al cargar el pedido pendiente.');
+    }
+});
+
+bot.action('btn_view_pending_list', async (ctx) => {
+    try {
+        const pendingOrders = await prisma.order.findMany({
+            where: { status: 'PENDING_APPROVAL' },
+            include: { client: true },
+            orderBy: { createdAt: 'asc' }
+        });
+
+        if (pendingOrders.length === 0) {
+            return ctx.editMessageText('No hay pedidos pendientes de clientes en este momento.');
+        }
+
+        const buttons = pendingOrders.map(o => {
+            const clientName = o.client ? o.client.firstName : 'Desconocido';
+            return [Markup.button.callback(`🕒 ${clientName} - $${o.total.toFixed(2)}`, `waiter_view_pending_${o.id}`)];
+        });
+
+        await ctx.editMessageText('🛎️ *Pedidos Pendientes de Clientes*\nSelecciona un pedido para revisarlo:', {
+            parse_mode: 'MarkdownV2',
+            reply_markup: { inline_keyboard: buttons }
+        });
+    } catch (err) {
+        console.error(err);
+        await ctx.answerCbQuery('Error al cargar pedidos pendientes.');
+    }
+});
+
+bot.action(/waiter_accept_order_(.+)/, async (ctx) => {
+    const orderId = ctx.match[1];
+    const telegramId = ctx.from.id;
+    try {
+        const waiter = await prisma.user.findUnique({ where: { telegramId } });
+        if (!waiter) return ctx.answerCbQuery('Personal no autorizado');
+
+        const order = await prisma.order.findUnique({ where: { id: orderId }, include: { client: true } });
+        if (!order || order.status !== 'PENDING_APPROVAL') {
+            return ctx.answerCbQuery('El pedido ya fue procesado o no existe.', { show_alert: true });
+        }
+
+        await prisma.order.update({
+            where: { id: orderId },
+            data: {
+                status: 'OPEN',
+                userId: waiter.id
+            }
+        });
+
+        await ctx.editMessageText(`✅ Pedido aceptado. La orden se ha movido a tus *Cuentas Abiertas*.`);
+
+        if (order.client && order.client.telegramId) {
+            try {
+                await ctx.telegram.sendMessage(
+                    Number(order.client.telegramId),
+                    `✅ *¡Tu pedido ha sido recibido y se está preparando\\!*\nSerás notificado por el personal de cualquier actualización\\.`,
+                    { parse_mode: 'MarkdownV2' }
+                );
+            } catch (e) {
+                console.error(`Could not notify client ${order.client.telegramId}`);
+            }
+        }
+
+        // Notify Dashboard of status change
+        notifyDashboard('order_updated', { orderId: order.id, status: 'OPEN' });
+
+    } catch (err) {
+        console.error(err);
+        await ctx.answerCbQuery('Error al aceptar el pedido.');
+    }
+});
+// --- Web Admin Dashboard (Express & Socket.io) ---
+
+const app = express();
+const server = createServer(app);
+const io = new Server(server, {
+    cors: {
+        origin: "*",
+        methods: ["GET", "POST"]
+    }
+});
+
+app.use(cors());
+app.use(express.json());
+
+// JSON BigInt serialization fix
+(BigInt.prototype as any).toJSON = function () {
+    return this.toString();
+};
+
+// Serve static frontend files
+// Multer configuration for image uploads
+const uploadDir = path.join(__dirname, '../public/uploads');
+if (!fs.existsSync(uploadDir)) {
+    fs.mkdirSync(uploadDir, { recursive: true });
+}
+
+const storage = multer.diskStorage({
+    destination: (req, file, cb) => {
+        cb(null, uploadDir);
+    },
+    filename: (req, file, cb) => {
+        const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+        cb(null, uniqueSuffix + path.extname(file.originalname));
+    }
+});
+const upload = multer({ storage: storage });
+
+app.use(express.static(path.join(__dirname, '../public')));
+
+// Upload endpoint
+app.post('/api/upload', upload.single('image'), (req, res) => {
+    if (!req.file) {
+        return res.status(400).json({ error: 'No file uploaded' });
+    }
+    const imageUrl = `/uploads/${req.file.filename}`;
+    res.json({ imageUrl });
+});
+
+// Helper to notify dashboard
+function notifyDashboard(event: string, data?: any) {
+    io.emit(event, data);
+}
+
+// API Routes
+app.get('/api/status', async (req, res) => {
+    try {
+        const activeTables = await prisma.table.count({ where: { status: 'OCCUPIED' } });
+        const clientOrders = await prisma.order.count({
+            where: {
+                tableId: null,
+                clientId: { not: null },
+                status: { in: ['OPEN', 'PENDING_APPROVAL'] }
+            }
+        });
+        const toGoOrders = await prisma.order.count({
+            where: {
+                tableId: null,
+                clientId: null,
+                status: { in: ['OPEN', 'PENDING_APPROVAL'] }
+            }
+        });
+        res.json({ activeTables, clientOrders, toGoOrders });
+    } catch (e) {
+        console.error('API /api/status error:', e);
+        res.status(500).json({ error: 'Server error' });
+    }
+});
+
+app.get('/api/orders', async (req, res) => {
+    try {
+        const orders = await prisma.order.findMany({
+            where: { status: { in: ['OPEN', 'PENDING_APPROVAL'] } },
+            include: { items: true, table: true, client: true, user: true },
+            orderBy: { createdAt: 'desc' }
+        });
+        res.json(orders);
+    } catch (e) {
+        console.error('API /api/orders error:', e);
+        res.status(500).json({ error: 'Server error' });
+    }
+});
+
+app.get('/api/tables', async (req, res) => {
+    try {
+        const tables = await prisma.table.findMany({
+            orderBy: { number: 'asc' },
+            include: {
+                orders: {
+                    where: { status: { in: ['OPEN', 'PENDING_APPROVAL', 'CART'] as any } },
+                    include: {
+                        user: true,
+                        items: {
+                            include: { user: true } as any
+                        }
+                    }
+                }
+            }
+        });
+
+        // Format data for the frontend
+        const formattedTables = tables.map((t: any) => {
+            const activeOrder = t.orders[0] || null;
+            let waiters: string[] = [];
+            if (activeOrder) {
+                // Primary waiter
+                if (activeOrder.user) waiters.push(activeOrder.user.firstName);
+                // Contributors
+                (activeOrder.items as any[]).forEach(item => {
+                    if (item.user && !waiters.includes(item.user.firstName)) {
+                        waiters.push(item.user.firstName);
+                    }
+                });
+            }
+
+            return {
+                id: t.id,
+                number: t.number,
+                status: t.status,
+                activeOrder: activeOrder ? {
+                    total: activeOrder.total,
+                    waiters: waiters,
+                    items: activeOrder.items.map((i: any) => ({
+                        name: i.name,
+                        quantity: i.quantity,
+                        price: i.price
+                    }))
+                } : null
+            };
+        });
+
+        res.json(formattedTables);
+    } catch (e) {
+        console.error('API /api/tables error:', e);
+        res.status(500).json({ error: 'Server error' });
+    }
+});
+
+app.post('/api/tables', async (req, res) => {
+    try {
+        const lastTable = await prisma.table.findFirst({
+            orderBy: { number: 'desc' }
+        });
+        const nextNumber = lastTable ? lastTable.number + 1 : 1;
+
+        const newTable = await prisma.table.create({
+            data: { number: nextNumber }
+        });
+
+        res.status(201).json(newTable);
+    } catch (e) {
+        console.error('API POST /api/tables error:', e);
+        res.status(500).json({ error: 'Server error' });
+    }
+});
+
+app.patch('/api/tables/:id/status', async (req, res) => {
+    try {
+        const { id } = req.params;
+        const table = await prisma.table.findUnique({
+            where: { id },
+            include: { orders: { where: { status: { in: ['OPEN', 'PENDING_APPROVAL'] as any } } } }
+        });
+        if (!table) return res.status(404).json({ error: 'Table not found' });
+
+        let newStatus: string;
+        if ((table.status as string) === 'BLOCKED') {
+            // When unblocking, check if it should be OCCUPIED or AVAILABLE
+            newStatus = table.orders.length > 0 ? 'OCCUPIED' : 'AVAILABLE';
+        } else {
+            // When blocking from any state (AVAILABLE or OCCUPIED)
+            newStatus = 'BLOCKED';
+        }
+
+        const updatedTable = await prisma.table.update({
+            where: { id },
+            data: { status: newStatus as any }
+        });
+
+        notifyDashboard('table_updated');
+
+        res.json(updatedTable);
+    } catch (e) {
+        console.error('API PATCH /api/tables status error:', e);
+        res.status(500).json({ error: 'Server error' });
+    }
+});
+
+app.delete('/api/tables/:id', async (req, res) => {
+    try {
+        const { id } = req.params;
+
+        // Dissociate from orders first if needed, but usually we don't delete tables with active orders
+        const activeOrder = await prisma.order.findFirst({
+            where: { tableId: id, status: { in: ['OPEN', 'PENDING_APPROVAL'] as any } }
+        });
+
+        if (activeOrder) {
+            return res.status(400).json({ error: 'No se puede eliminar una mesa con órdenes activas.' });
+        }
+
+        await prisma.table.delete({ where: { id } });
+        res.json({ success: true });
+    } catch (e) {
+        console.error('API DELETE /api/tables error:', e);
+        res.status(500).json({ error: 'Server error' });
+    }
+});
+
+app.get('/api/sales', async (req, res) => {
+    try {
+        const start = new Date();
+        start.setHours(0, 0, 0, 0);
+        const end = new Date();
+        end.setHours(23, 59, 59, 999);
+
+        const where = { status: 'CLOSED' as any, closedAt: { gte: start, lte: end } };
+
+        const summary = await prisma.order.aggregate({
+            _sum: { total: true },
+            where
+        });
+
+        const history = await prisma.order.findMany({
+            where,
+            include: {
+                table: true,
+                user: true, // Waiter who opened
+                closedBy: true, // Who closed it
+            },
+            orderBy: { closedAt: 'desc' }
+        });
+
+        res.json({
+            total: summary._sum.total || 0,
+            count: history.length,
+            history: (history as any[]).map(o => ({
+                id: o.id,
+                location: o.table ? `Mesa ${o.table.number}` : 'App',
+                waiter: o.user ? o.user.firstName : 'N/A',
+                closer: o.closedBy ? o.closedBy.firstName : 'N/A',
+                total: o.total,
+                method: o.paymentMethod,
+                time: o.closedAt
+            }))
+        });
+    } catch (e) {
+        console.error('API /api/sales error:', e);
+        res.status(500).json({ error: 'Server error' });
+    }
+});
+
+app.get('/api/users', async (req, res) => {
+    try {
+        const users = await prisma.user.findMany({
+            orderBy: { createdAt: 'desc' }
+        });
+        // BigInt needs to be converted to string for JSON
+        const sanitizedUsers = users.map(u => ({
+            ...u,
+            telegramId: u.telegramId.toString()
+        }));
+        res.json(sanitizedUsers);
+    } catch (e) {
+        console.error('API /api/users error:', e);
+        res.status(500).json({ error: 'Server error' });
+    }
+});
+
+app.get('/api/roles', (req, res) => {
+    // Return available roles from enum
+    res.json(['ADMIN', 'MESERO', 'CONTADOR', 'CLIENTE', 'PENDING', 'REJECTED']);
+});
+
+app.patch('/api/users/:id/role', async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { role } = req.body;
+
+        const updatedUser = await prisma.user.update({
+            where: { id },
+            data: { role: role as any }
+        });
+
+        res.json({
+            success: true,
+            user: {
+                ...updatedUser,
+                telegramId: updatedUser.telegramId.toString()
+            }
+        });
+    } catch (e) {
+        console.error('API PATCH /api/users role error:', e);
+        res.status(500).json({ error: 'Server error' });
+    }
+});
+
+app.delete('/api/users/:id', async (req, res) => {
+    try {
+        const { id } = req.params;
+
+        // Nullify references in orders to preserve history before deleting the user
+        await prisma.$transaction([
+            prisma.order.updateMany({
+                where: { OR: [{ userId: id }, { clientId: id }, { closedById: id }] },
+                data: { userId: null, clientId: null, closedById: null }
+            }),
+            prisma.orderItem.updateMany({
+                where: { userId: id } as any,
+                data: { userId: null } as any
+            }),
+            prisma.user.delete({
+                where: { id }
+            })
+        ]);
+
+        res.json({ success: true, message: 'User deleted successfully' });
+    } catch (e) {
+        console.error('API DELETE /api/users error:', e);
+        res.status(500).json({ error: 'Server error' });
+    }
+});
+
+app.post('/api/broadcast', async (req, res) => {
+    try {
+        const { message, imageUrl } = req.body;
+        if (!message) return res.status(400).json({ error: 'Message is required' });
+
+        const clients = await prisma.user.findMany({
+            where: { role: 'CLIENTE' }
+        });
+
+        console.log(`Starting broadcast to ${clients.length} clients${imageUrl ? ' with image' : ''}`);
+
+        let successCount = 0;
+        let failCount = 0;
+
+        for (const client of clients) {
+            try {
+                if (imageUrl) {
+                    let photoSource: any = imageUrl;
+                    // If it's a local path (starts with /uploads), use the absolute path for telegraf
+                    if (imageUrl.startsWith('/uploads/')) {
+                        photoSource = { source: path.join(__dirname, '../public', imageUrl) };
+                    }
+
+                    await bot.telegram.sendPhoto(client.telegramId.toString(), photoSource, {
+                        caption: message
+                    });
+                } else {
+                    await bot.telegram.sendMessage(client.telegramId.toString(), message);
+                }
+                successCount++;
+                await new Promise(resolve => setTimeout(resolve, 500));
+            } catch (err) {
+                console.error(`Failed to send broadcast to ${client.firstName} (${client.telegramId}):`, err);
+                failCount++;
+            }
+        }
+
+        res.json({
+            success: true,
+            total: clients.length,
+            sent: successCount,
+            failed: failCount
+        });
+    } catch (e) {
+        console.error('API /api/broadcast error:', e);
+        res.status(500).json({ error: 'Server error' });
+    }
+});
+
+app.get('/api/ticket/:orderId', async (req, res) => {
+    try {
+        const orderId = req.params.orderId;
+        const [order, config] = await Promise.all([
+            prisma.order.findUnique({
+                where: { id: orderId },
+                include: {
+                    table: true,
+                    items: true,
+                    user: true,
+                    client: true
+                }
+            }),
+            prisma.restaurantConfig.findFirst()
+        ]);
+
+        if (!order) return res.status(404).json({ error: 'Order not found' });
+
+        console.log(`Generating ticket image for dashboard, order: ${orderId}`);
+        const imageBuffer = await generateTicketImage(order, config || {});
+
+        res.set('Content-Type', 'image/png');
+        res.send(imageBuffer);
+    } catch (e) {
+        console.error('API /api/ticket error:', e);
+        res.status(500).json({ error: 'Server error generating ticket' });
+    }
+});
+
+const PORT = process.env.PORT || 3000;
+server.listen(PORT, () => {
+    console.log(`Web Admin Dashboard running on port ${PORT} `);
+});
+
 // Start bot
-bot.launch().then(async () => {
-    console.log('Bot is running...');
+console.log('Bot is starting [v1.0.5]...');
+bot.launch({
+    dropPendingUpdates: true
+}).then(async () => {
+    console.log('Bot is polling [v1.0.5]...');
     try {
         await bot.telegram.setMyCommands([
             { command: 'start', description: 'Abrir el bot' },
@@ -1386,8 +2657,17 @@ bot.launch().then(async () => {
     } catch (e) {
         console.error('Failed to set my commands', e);
     }
+}).catch(err => {
+    console.error('CRITICAL: Bot failed to launch!', err);
+    process.exit(1);
 });
 
 // Enable graceful stop
-process.once('SIGINT', () => bot.stop('SIGINT'));
-process.once('SIGTERM', () => bot.stop('SIGTERM'));
+process.once('SIGINT', () => {
+    bot.stop('SIGINT');
+    server.close();
+});
+process.once('SIGTERM', () => {
+    bot.stop('SIGTERM');
+    server.close();
+});

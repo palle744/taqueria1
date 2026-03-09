@@ -27,12 +27,14 @@ model User {
   updatedAt    DateTime @updatedAt
   orders       Order[]  @relation("OrderWaiter")
   closedOrders Order[]  @relation("OrderCloser")
-  clientOrders Order[]  @relation("OrderClient")
+  clientOrders Order[]     @relation("OrderClient")
+  items        OrderItem[]
 }
 
 enum TableStatus {
   AVAILABLE
   OCCUPIED
+  BLOCKED
 }
 
 model Table {
@@ -45,6 +47,8 @@ model Table {
 }
 
 enum OrderStatus {
+  CART
+  PENDING_APPROVAL
   OPEN
   CLOSED
 }
@@ -57,12 +61,13 @@ enum PaymentMethod {
 
 model Order {
   id            String        @id @default(uuid())
-  tableId       String
-  table         Table         @relation(fields: [tableId], references: [id])
-  userId        String
-  user          User          @relation("OrderWaiter", fields: [userId], references: [id])
+  tableId       String?
+  table         Table?        @relation(fields: [tableId], references: [id])
+  userId        String?
+  user          User?         @relation("OrderWaiter", fields: [userId], references: [id])
   clientId      String?
   client        User?         @relation("OrderClient", fields: [clientId], references: [id])
+  pickupCode    String?
   status        OrderStatus   @default(OPEN)
   total         Float         @default(0.0)
   paymentMethod PaymentMethod @default(UNKNOWN)
@@ -78,6 +83,8 @@ model OrderItem {
   id        String   @id @default(uuid())
   orderId   String
   order     Order    @relation(fields: [orderId], references: [id])
+  userId    String?
+  user      User?    @relation(fields: [userId], references: [id])
   name      String
   price     Float
   quantity  Int      @default(1)
@@ -99,4 +106,12 @@ model RestaurantConfig {
   locationText    String?
   thankYouMessage String?
   updatedAt       DateTime @updatedAt
+}
+
+model Expense {
+  id          String   @id @default(uuid())
+  description String
+  amount      Float
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
 }

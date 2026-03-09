@@ -1,0 +1,258 @@
+<!DOCTYPE html>
+<html lang="es">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Tacos - Panel Web</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+    <link rel="stylesheet" href="styles.css">
+</head>
+
+<body>
+    <div id="login-container" class="glass-panel text-center">
+        <img src="https://cdn-icons-png.flaticon.com/512/8208/8208153.png" alt="Logo" class="logo">
+        <h2>Panel Administrativo</h2>
+        <input type="password" id="admin-pin" placeholder="Ingresa PIN de Acceso" />
+        <button id="login-btn" class="btn btn-primary">Acceder</button>
+        <p id="login-err" class="text-danger mt-2" style="display: none;">PIN Incorrecto</p>
+    </div>
+
+    <div id="dashboard" style="display: none;">
+        <nav class="sidebar glass-panel">
+            <div class="sidebar-header">
+                <h3>🌮 Tacos Admin</h3>
+            </div>
+            <ul class="nav-links">
+                <li class="active" data-target="vista-general">📊 Vista General</li>
+                <li data-target="vista-ordenes">🧾 Cuentas Abiertas <span id="badge-orders" class="badge">0</span></li>
+                <li data-target="vista-para-llevar">🥡 Para Llevar <span id="badge-togo" class="badge">0</span></li>
+                <li data-target="vista-mesas">🪑 Mesas <span id="badge-tables" class="badge">0</span></li>
+                <li data-target="vista-personal">👥 Personal</li>
+                <li data-target="vista-clientes">🛍️ Clientes</li>
+            </ul>
+            <div class="sidebar-footer">
+                <button class="btn btn-logout" id="logout-btn" onclick="logout()">
+                    <i class="fas fa-sign-out-alt"></i> Salir
+                </button>
+            </div>
+        </nav>
+
+        <main class="main-content">
+            <!-- VISTA GENERAL -->
+            <section id="vista-general" class="tab-content active">
+                <div class="header-section">
+                    <h1>Resumen del Día</h1>
+                    <button class="btn btn-icon" id="btn-refresh"><i class="fas fa-sync"></i> Actualizar</button>
+                </div>
+
+                <div class="stats-grid">
+                    <div class="stat-card glass-panel">
+                        <div class="stat-icon"><i class="fas fa-dollar-sign"></i></div>
+                        <div class="stat-info">
+                            <p>Ventas del Día</p>
+                            <h2 id="total-ventas">$0.00</h2>
+                        </div>
+                    </div>
+                    <div class="stat-card glass-panel">
+                        <div class="stat-icon"><i class="fas fa-receipt"></i></div>
+                        <div class="stat-info">
+                            <p>Cuentas Cobradas</p>
+                            <h2 id="total-cuentas">0</h2>
+                        </div>
+                    </div>
+                    <div class="stat-card glass-panel">
+                        <div class="stat-icon"><i class="fas fa-utensils"></i></div>
+                        <div class="stat-info">
+                            <p>Ticket Promedio</p>
+                            <h2 id="ticket-promedio">$0.00</h2>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="glass-panel mt-4 p-20">
+                    <h3 class="mb-3">Detalle de Ventas del Día</h3>
+                    <div class="table-container">
+                        <table class="sales-table">
+                            <thead>
+                                <tr>
+                                    <th>Hora</th>
+                                    <th>Origen</th>
+                                    <th>Apertura</th>
+                                    <th>Cierre</th>
+                                    <th>M. Pago</th>
+                                    <th>Total</th>
+                                    <th>Acciones</th>
+                                </tr>
+                            </thead>
+                            <tbody id="sales-history-body">
+                                <!-- Se llena con JS -->
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </section>
+
+            <!-- VISTA ORDENES -->
+            <section id="vista-ordenes" class="tab-content">
+                <div class="header-section">
+                    <h1>Cuentas Abiertas (Cocina / Caja)</h1>
+                    <button class="btn btn-icon btn-refresh-orders"><i class="fas fa-sync"></i> Actualizar</button>
+                </div>
+                <div id="orders-container" class="cards-grid">
+                    <!-- Se llena con JS -->
+                </div>
+            </section>
+
+            <!-- VISTA PARA LLEVAR -->
+            <section id="vista-para-llevar" class="tab-content">
+                <div class="header-section">
+                    <h1>Pedidos Para Llevar (🥡)</h1>
+                    <button class="btn btn-icon btn-refresh-orders"><i class="fas fa-sync"></i> Actualizar</button>
+                </div>
+                <div id="togo-container" class="cards-grid">
+                    <!-- Se llena con JS -->
+                </div>
+            </section>
+
+            <!-- VISTA MESAS -->
+            <section id="vista-mesas" class="tab-content">
+                <div class="header-section">
+                    <h1>Estado de Mesas</h1>
+                    <div class="flex-center" style="display: flex; align-items: center; gap: 15px;">
+                        <div class="mgmt-toggle-container">
+                            <span>Modo Gestión</span>
+                            <label class="switch">
+                                <input type="checkbox" id="mgmt-mode-toggle" onchange="toggleMgmtMode()">
+                                <span class="slider round"></span>
+                            </label>
+                        </div>
+                        <button class="btn btn-success" onclick="createTable()" id="btn-add-table"
+                            style="display:none;"><i class="fas fa-plus"></i> Nueva Mesa</button>
+                        <button class="btn btn-icon btn-refresh-tables"><i class="fas fa-sync"></i> Actualizar</button>
+                    </div>
+                </div>
+                <div id="tables-container" class="cards-grid">
+                    <!-- Se llena con JS -->
+                </div>
+            </section>
+
+            <!-- VISTA PERSONAL -->
+            <section id="vista-personal" class="tab-content">
+                <div class="header-section">
+                    <h1>Gestión de Personal</h1>
+                    <button class="btn btn-icon" onclick="fetchUsers()"><i class="fas fa-sync"></i> Actualizar</button>
+                </div>
+                <div class="glass-panel p-20">
+                    <div class="table-container">
+                        <table class="sales-table">
+                            <thead>
+                                <tr>
+                                    <th>Nombre</th>
+                                    <th>Username</th>
+                                    <th>Rol Actual</th>
+                                    <th>Registro</th>
+                                    <th>Acciones</th>
+                                </tr>
+                            </thead>
+                            <tbody id="staff-table-body">
+                                <!-- Se llena con JS -->
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </section>
+
+            <!-- VISTA CLIENTES -->
+            <section id="vista-clientes" class="tab-content">
+                <div class="header-section">
+                    <h1>Cartera de Clientes App</h1>
+                    <button class="btn btn-icon" onclick="fetchUsers()"><i class="fas fa-sync"></i> Actualizar</button>
+                </div>
+
+                <!-- Broadcast Section -->
+                <div class="glass-panel p-20 mb-20">
+                    <div class="flex-center mb-10">
+                        <h3 style="margin:0;">📢 Mensaje Masivo</h3>
+                    </div>
+                    <p class="text-muted mb-20" style="font-size: 0.9em;">Envía promociones o avisos a todos tus
+                        clientes registrados.</p>
+
+                    <div class="broadcast-form">
+                        <textarea id="broadcast-msg" placeholder="Escribe aquí tu mensaje..."></textarea>
+
+                        <div class="upload-container" onclick="document.getElementById('broadcast-file').click()">
+                            <input type="file" id="broadcast-file" accept="image/*" style="display: none;"
+                                onchange="handleImageSelect(this)">
+                            <div class="upload-icon"><i class="fas fa-cloud-upload-alt"></i></div>
+                            <p id="upload-text">Haz clic para subir imagen o arrástrala aquí</p>
+                            <small class="text-muted">Formatos: JPG, PNG, GIF</small>
+                        </div>
+
+                        <div id="image-preview-container" class="image-preview-wrapper">
+                            <img id="image-preview" src="" alt="Preview">
+                            <button class="remove-img-btn" onclick="clearImageSelection()"><i
+                                    class="fas fa-times"></i></button>
+                        </div>
+
+                        <input type="text" id="broadcast-img-url" placeholder="O pega URL de imagen externa (opcional)">
+
+                        <div class="broadcast-footer">
+                            <span id="broadcast-status" class="text-muted" style="font-size: 0.85em;"></span>
+                            <button class="btn btn-primary" id="broadcast-send-btn" onclick="sendBroadcast()"
+                                style="width: auto; min-width: 180px;">
+                                <i class="fas fa-paper-plane"></i> Enviar a Clientes
+                            </button>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="glass-panel p-20">
+                    <div class="table-container">
+                        <table class="sales-table">
+                            <thead>
+                                <tr>
+                                    <th>Nombre</th>
+                                    <th>Username</th>
+                                    <th>WhatsApp/Tel</th>
+                                    <th>Registro</th>
+                                    <th>Acciones</th>
+                                </tr>
+                            </thead>
+                            <tbody id="clients-table-body">
+                                <!-- Se llena con JS -->
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </section>
+        </main>
+    </div>
+
+    <!-- TICKET MODAL -->
+    <div id="ticket-modal" class="modal hidden">
+        <div class="modal-content glass-panel">
+            <div class="modal-header">
+                <h3>Previsualización de Ticket</h3>
+                <button class="close-modal" onclick="closeTicketModal()">&times;</button>
+            </div>
+            <div class="modal-body text-center">
+                <div id="ticket-loading" class="spinner hidden"></div>
+                <img id="ticket-img" src="" alt="Ticket"
+                    style="max-width: 100%; border-radius: 8px; box-shadow: 0 4px 15px rgba(0,0,0,0.2);">
+                <div class="modal-actions mt-4">
+                    <button class="btn btn-primary" onclick="downloadTicket()"><i class="fas fa-download"></i> Descargar
+                        Imagen</button>
+                    <button class="btn btn-secondary" onclick="printTicket()"><i class="fas fa-print"></i>
+                        Imprimir</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="/socket.io/socket.io.js"></script>
+    <script src="app.js"></script>
+</body>
+
+</html>
